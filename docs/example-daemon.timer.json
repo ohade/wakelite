@@ -1,0 +1,30 @@
+{
+  "name": "example-daemon",
+  "comment": "Example daemon timer — long-running process with restart on failure",
+  "enabled": true,
+  "timer_type": "daemon",
+  "recurrence": {
+    "frequency": "interval",
+    "every": "0s"
+  },
+  "execution": {
+    "overlap": "skip",
+    "restart_on_failure": true,
+    "restart_delay_seconds": 5,
+    "restart_max_backoff_seconds": 300
+  },
+  "command": {
+    "mode": "shell",
+    "shell": "echo 'daemon started'; sleep 60",
+    "workingDirectory": "/Users/<user>/git"
+  },
+  "wake": {
+    "enabled": false,
+    "action": "wake",
+    "leadMinutes": 0
+  },
+  "notifications": {
+    "onSuccess": false,
+    "onFailure": true
+  }
+}

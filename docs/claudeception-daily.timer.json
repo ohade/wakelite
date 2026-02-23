@@ -1,0 +1,20 @@
+{
+  "name": "claudeception-daily",
+  "comment": "Nightly claudeception knowledge extraction batch",
+  "enabled": true,
+  "recurrence": {
+    "frequency": "daily",
+    "time": "01:55",
+    "interval": 1
+  },
+  "command": {
+    "mode": "shell",
+    "shell": "/Users/<user>/.claude/skills/claudeception/scripts/daily-batch.sh",
+    "workingDirectory": "/Users/<user>/git"
+  },
+  "wake": {
+    "enabled": true,
+    "action": "wake",
+    "leadMinutes": 2
+  }
+}

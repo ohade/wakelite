@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wakelite"
+version = "3.0.0"
+description = "Reliability-first wake and task scheduler for macOS with MCP integration"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+ui = ["rumps>=0.4.0"]
+
+[project.scripts]
+wakelitectl = "wakelite.cli:main"
+wakelite-mcp = "wakelite.mcp_server:main"
+wakelite-runner = "wakelite.runner_main:main"
+wakelite-reconciler = "wakelite.reconciler:main"
+wakelite-menubar = "wakelite.menubar:main"

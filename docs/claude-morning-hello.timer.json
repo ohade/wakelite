@@ -1,0 +1,20 @@
+{
+  "name": "claude-morning-hello",
+  "comment": "Morning greeting from Claude at 7am",
+  "enabled": true,
+  "recurrence": {
+    "frequency": "daily",
+    "time": "07:00",
+    "interval": 1
+  },
+  "command": {
+    "mode": "shell",
+    "shell": "/opt/homebrew/bin/claude -p hello --max-turns 3",
+    "workingDirectory": "/Users/<user>/git"
+  },
+  "wake": {
+    "enabled": true,
+    "action": "wake",
+    "leadMinutes": 5
+  }
+}

@@ -1,0 +1,16 @@
+# WakeLite Photorealistic Logo Prompts
+
+## Concept 1: The Beacon
+A dramatic photorealistic lighthouse at night on a rocky cliff edge, powerful dual golden light beams sweeping through dense fog over a dark ocean. The lighthouse is white stone with two red horizontal stripes, a brass and glass lantern room glowing warm amber. Jagged wet rocks at the base, violent ocean spray. Stars visible through breaks in the fog. Cinematic lighting, 4K, dark moody atmosphere, deep indigo night sky, the golden beam is volumetric and cuts through mist. Shot from slightly below looking up. Octane render, hyperrealistic, dramatic atmosphere.
+
+## Concept 2: Night Watch
+A solitary minimalist lighthouse standing on a still black ocean under a crescent moon, single powerful beam of golden light shooting across a perfectly calm sea. The lighthouse is sleek white stone, modern and geometric. The beam creates a long golden reflection trail on the mirror-like water surface. Clear starry sky, Milky Way faintly visible. Peaceful, contemplative mood. Deep indigo and navy tones. The light is the only warm element in the frame. Cinematic photography, 4K, hyperrealistic, long exposure style, tilt-shift miniature effect.
+
+## Concept 3: Storm Keeper
+A photorealistic lighthouse standing defiant on a cliff during a violent storm at night. Massive dark clouds, rain streaking across the frame, lightning bolt in the background illuminating cloud edges purple. The lighthouse beam cuts horizontally through sheets of rain, creating visible light rays through water droplets. Rough ocean with 30-foot waves crashing against the cliff base, white foam. The lighthouse is weathered stone, battle-scarred but the light burns bright. The amber glow of the lantern room is the only warmth in the cold blue-grey storm. Shot during peak storm, cinematic, 4K, hyperrealistic, dramatic weather photography, volumetric rain.
+
+## Concept 4: Harbor Light
+A warm, inviting photorealistic lighthouse at twilight golden hour, overlooking a calm harbor. Small wooden fishing boats moored at a weathered pier, their hulls reflecting the warm amber glow from the lighthouse lantern. The sky transitions from deep indigo at top to warm amber at the horizon. Gentle ripples in the harbor water carry streaks of golden light. Cozy cottage with lit windows at the lighthouse base. Moss on the rocks, a winding stone path. The whole scene feels like coming home. Shot with a vintage 85mm lens, shallow depth of field on the foreground rocks, cinematic color grading, 4K, hyperrealistic.
+
+## Concept 5: Signal Tower
+A photorealistic futuristic lighthouse reimagined as a sleek technology signal tower on a dark coastline. The tower is matte black and brushed steel with subtle indigo LED strip accents running vertically. The lantern room is a hexagonal glass pod emitting concentric rings of golden light that pulse outward like sonar. Fiber optic cables glow indigo along the ground, connecting to smaller relay nodes that dot the coastline, each glowing amber. The sky is clear and dark with visible stars. The ocean below reflects the golden pulse rings. Cyberpunk meets maritime. Cinematic, 4K, Octane render, volumetric lighting, sci-fi atmosphere.

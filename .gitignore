@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.wakelite-local/
+.wakelite/
+.DS_Store
+node_modules/
+playwright-report/
+scripts/

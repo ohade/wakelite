@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WakeLite Logo Concepts — Lighthouse</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #020617;
+      color: #E0E7FF;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+      padding: 40px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 36px;
+      color: #F9FAFB;
+      margin-bottom: 8px;
+      letter-spacing: -0.5px;
+    }
+    .subtitle {
+      text-align: center;
+      color: #818CF8;
+      font-size: 14px;
+      margin-bottom: 48px;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      line-height: 1.6;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 48px;
+      max-width: 920px;
+      margin: 0 auto;
+    }
+    .concept {
+      background: #0F172A;
+      border: 1px solid #1E1B4B;
+      border-radius: 16px;
+      padding: 32px;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 32px;
+      align-items: center;
+    }
+    .concept:hover { border-color: #4338CA; }
+    .logo-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at center, rgba(99,102,241,0.08) 0%, transparent 70%);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .logo-wrap svg { filter: drop-shadow(0 4px 20px rgba(99,102,241,0.25)); }
+    .info h2 { font-size: 22px; color: #F9FAFB; margin-bottom: 4px; }
+    .info .tag {
+      display: inline-block;
+      background: #312E81;
+      color: #A5B4FC;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .info p { font-size: 14px; line-height: 1.65; color: #C7D2FE; margin-bottom: 10px; }
+    .info .detail { font-size: 12px; color: #818CF8; line-height: 1.6; }
+    .palette { display: flex; gap: 6px; margin-top: 10px; }
+    .swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); }
+    .palette-label { font-size: 11px; color: #6366F1; margin-top: 8px; }
+    .header-preview {
+      margin-top: 16px;
+      background: #020617;
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid #1E1B4B;
+    }
+    .header-preview svg { flex-shrink: 0; }
+    .header-preview .wordmark {
+      font-size: 22px;
+      font-weight: 700;
+      color: #F9FAFB;
+      letter-spacing: -0.3px;
+    }
+    .header-preview .wordmark span { color: #FBBF24; }
+    @media (max-width: 700px) {
+      .concept { grid-template-columns: 1fr; }
+      .logo-wrap { max-width: 220px; margin: 0 auto; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>WakeLite Logo Concepts</h1>
+<p class="subtitle">A lighthouse shines through the dark, guiding ships to safe harbor.
+WakeLite watches through sleep, guiding your tasks to safe completion — always on, reliability-first.</p>
+
+<div class="grid">
+
+  <!-- ============================================================ -->
+  <!-- CONCEPT 1: The Beacon -->
+  <!-- ============================================================ -->
+  <div class="concept">
+    <div class="logo-wrap">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="220" height="220">
+        <defs>
+          <radialGradient id="bg1" cx="50%" cy="30%" r="60%">
+            <stop offset="0%" stop-color="#1E1B4B"/>
+            <stop offset="100%" stop-color="#070B1A"/>
+          </radialGradient>
+          <linearGradient id="tower1" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#C7D2FE"/>
+            <stop offset="100%" stop-color="#6366F1"/>
+          </linearGradient>
+          <linearGradient id="lantern1" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#FDE68A"/>
+            <stop offset="100%" stop-color="#FBBF24"/>
+          </linearGradient>
+          <radialGradient id="beamGlow1" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#FBBF24" stop-opacity="0.5"/>
+            <stop offset="40%" stop-color="#FBBF24" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#FBBF24" stop-opacity="0"/>
+          </radialGradient>
+          <filter id="softGlow1">
+            <feGaussianBlur stdDeviation="6"/>
+          </filter>
+          <filter id="tinyGlow1">
+            <feGaussianBlur stdDeviation="2" result="b"/>
+            <feComposite in="SourceGraphic" in2="b" operator="over"/>
+          </filter>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#bg1)" stroke="#312E81" stroke-width="1.5"/>
+
+        <!-- Ocean / water line -->
+        <path d="M10 158 Q30 152 50 158 Q70 164 90 158 Q110 152 130 158 Q150 164 170 158 Q190 152 200 158" fill="none" stroke="#4338CA" stroke-width="1.2" opacity="0.4"/>
+        <path d="M10 164 Q30 158 50 164 Q70 170 90 164 Q110 158 130 164 Q150 170 170 164 Q190 158 200 164" fill="none" stroke="#4338CA" stroke-width="1" opacity="0.25"/>
+
+        <!-- Rocky base -->
+        <path d="M60 156 L72 148 L82 152 L88 146 L100 150 L112 144 L120 150 L128 146 L140 156 Z" fill="#312E81" stroke="#4338CA" stroke-width="0.8"/>
+
+        <!-- Lighthouse tower -->
+        <path d="M88 146 L84 100 L82 80 L118 80 L116 100 L112 146 Z" fill="url(#tower1)"/>
+        <!-- Tower stripes -->
+        <rect x="84" y="100" width="32" height="8" rx="0" fill="#EF4444" opacity="0.6"/>
+        <rect x="83" y="120" width="34" height="8" rx="0" fill="#EF4444" opacity="0.6"/>
+        <!-- Tower window -->
+        <rect x="94" y="108" width="12" height="10" rx="2" fill="#1E1B4B" stroke="#818CF8" stroke-width="0.8"/>
+        <line x1="100" y1="108" x2="100" y2="118" stroke="#818CF8" stroke-width="0.5" opacity="0.5"/>
+
+        <!-- Lantern room -->
+        <rect x="80" y="68" width="40" height="14" rx="3" fill="#312E81" stroke="#6366F1" stroke-width="1"/>
+        <!-- Lantern glass panels -->
+        <rect x="83" y="70" width="7" height="10" rx="1" fill="url(#lantern1)" opacity="0.85"/>
+        <rect x="92" y="70" width="7" height="10" rx="1" fill="url(#lantern1)" opacity="0.95"/>
+        <rect x="101" y="70" width="7" height="10" rx="1" fill="url(#lantern1)" opacity="0.85"/>
+        <rect x="110" y="70" width="7" height="10" rx="1" fill="url(#lantern1)" opacity="0.75"/>
+        <!-- Lantern gallery railing -->
+        <rect x="78" y="66" width="44" height="3" rx="1.5" fill="#818CF8"/>
+        <rect x="76" y="82" width="48" height="2.5" rx="1.25" fill="#818CF8"/>
+
+        <!-- Roof / dome -->
+        <path d="M86 66 L100 48 L114 66 Z" fill="#6366F1"/>
+        <circle cx="100" cy="48" r="3" fill="#A5B4FC"/>
+
+        <!-- LIGHT BEAM — sweeping right -->
+        <path d="M120 75 L190 30 L195 80 Z" fill="url(#beamGlow1)" opacity="0.6"/>
+        <!-- LIGHT BEAM — sweeping left -->
+        <path d="M80 75 L10 30 L5 80 Z" fill="url(#beamGlow1)" opacity="0.35"/>
+
+        <!-- Central lantern glow -->
+        <circle cx="100" cy="75" r="16" fill="#FBBF24" opacity="0.12" filter="url(#softGlow1)"/>
+        <circle cx="100" cy="75" r="10" fill="#FBBF24" opacity="0.18" filter="url(#softGlow1)"/>
+        <circle cx="100" cy="75" r="5" fill="#FDE68A" opacity="0.3"/>
+
+        <!-- Stars -->
+        <circle cx="30" cy="30" r="1.5" fill="#E0E7FF" opacity="0.7"/>
+        <circle cx="170" cy="25" r="1.2" fill="#E0E7FF" opacity="0.6"/>
+        <circle cx="50" cy="18" r="1" fill="#E0E7FF" opacity="0.5"/>
+        <circle cx="155" cy="40" r="1.3" fill="#E0E7FF" opacity="0.45"/>
+        <circle cx="25" cy="55" r="0.8" fill="#E0E7FF" opacity="0.35"/>
+        <circle cx="175" cy="55" r="0.9" fill="#E0E7FF" opacity="0.4"/>
+        <circle cx="140" cy="15" r="1" fill="#E0E7FF" opacity="0.5"/>
+        <circle cx="68" cy="32" r="0.7" fill="#E0E7FF" opacity="0.3"/>
+      </svg>
+    </div>
+    <div class="info">
+      <span class="tag">Concept 1</span>
+      <h2>The Beacon</h2>
+      <p>A classic lighthouse on rocky shores, dual light beams sweeping across the night sky. The lantern room glows amber through glass panels while the indigo tower stands firm against the dark ocean. Red navigation stripes mark the tower — a trusted, visible sentinel.</p>
+      <p class="detail">Tower gradient C7D2FE to 6366F1 with two red stripes at 60% opacity. Lantern room has 4 individual glass panels with amber gradient. Dual sweeping beam cones (right at 60%, left at 35%) using radial gradient fill. Triple-layer lantern glow (r=16/10/5). Rocky base with irregular polygon. Two ocean wave paths. Eight ambient stars.</p>
+      <div class="header-preview">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="36" height="36">
+          <circle cx="20" cy="20" r="19" fill="#0F0A2E" stroke="#312E81" stroke-width="1"/>
+          <path d="M16 32 L17.5 20 L17 15 L23 15 L22.5 20 L24 32 Z" fill="#6366F1"/>
+          <rect x="16.5" y="22" width="7" height="2.5" fill="#EF4444" opacity="0.5"/>
+          <rect x="15.5" y="12" width="9" height="4" rx="1" fill="#312E81" stroke="#6366F1" stroke-width="0.5"/>
+          <rect x="16.5" y="12.5" width="2.5" height="3" rx="0.5" fill="#FBBF24" opacity="0.9"/>
+          <rect x="19.5" y="12.5" width="2.5" height="3" rx="0.5" fill="#FBBF24" opacity="0.8"/>
+          <path d="M17 12 L20 6 L23 12 Z" fill="#6366F1"/>
+          <circle cx="20" cy="6" r="1.5" fill="#A5B4FC"/>
+          <circle cx="20" cy="14" r="4" fill="#FBBF24" opacity="0.15"/>
+          <path d="M23 14 L36 8 L36 18 Z" fill="#FBBF24" opacity="0.2"/>
+          <path d="M17 14 L4 8 L4 18 Z" fill="#FBBF24" opacity="0.12"/>
+        </svg>
+        <span class="wordmark">Wake<span>Lite</span></span>
+      </div>
+      <div class="palette">
+        <div class="swatch" style="background:#6366F1"></div>
+        <div class="swatch" style="background:#C7D2FE"></div>
+        <div class="swatch" style="background:#FBBF24"></div>
+        <div class="swatch" style="background:#EF4444"></div>
+        <div class="swatch" style="background:#070B1A"></div>
+      </div>
+      <p class="palette-label">Indigo tower, amber lantern, red stripes, deep ocean night</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CONCEPT 2: Night Watch — Minimal / Geometric -->
+  <!-- ============================================================ -->
+  <div class="concept">
+    <div class="logo-wrap">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="220" height="220">
+        <defs>
+          <radialGradient id="bg2" cx="50%" cy="40%" r="55%">
+            <stop offset="0%" stop-color="#1E1B4B"/>
+            <stop offset="100%" stop-color="#070B1A"/>
+          </radialGradient>
+          <linearGradient id="tower2" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#818CF8"/>
+            <stop offset="50%" stop-color="#A5B4FC"/>
+            <stop offset="100%" stop-color="#6366F1"/>
+          </linearGradient>
+          <filter id="beamBlur2"><feGaussianBlur stdDeviation="4"/></filter>
+          <filter id="glowSmall2"><feGaussianBlur stdDeviation="2" result="b"/><feComposite in="SourceGraphic" in2="b" operator="over"/></filter>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#bg2)" stroke="#312E81" stroke-width="1.5"/>
+
+        <!-- Geometric tower — clean trapezoid -->
+        <polygon points="90,155 86,90 114,90 110,155" fill="url(#tower2)"/>
+        <!-- Tower cap -->
+        <rect x="82" y="85" width="36" height="6" rx="2" fill="#A5B4FC"/>
+        <!-- Tower base -->
+        <rect x="78" y="155" width="44" height="5" rx="2" fill="#4338CA"/>
+
+        <!-- Lantern — simple circle -->
+        <circle cx="100" cy="72" r="14" fill="#1E1B4B" stroke="#6366F1" stroke-width="2"/>
+        <circle cx="100" cy="72" r="9" fill="#FBBF24" filter="url(#glowSmall2)"/>
+        <circle cx="100" cy="72" r="5" fill="#FDE68A"/>
+        <circle cx="100" cy="72" r="2.5" fill="#FFF7ED"/>
+
+        <!-- Single powerful beam — right -->
+        <polygon points="114,72 192,40 192,105" fill="#FBBF24" opacity="0.08"/>
+        <polygon points="114,72 190,45 190,100" fill="#FBBF24" opacity="0.12" filter="url(#beamBlur2)"/>
+        <!-- Beam core line -->
+        <line x1="114" y1="72" x2="192" y2="72" stroke="#FBBF24" stroke-width="1" opacity="0.25"/>
+
+        <!-- Roof spike -->
+        <line x1="100" y1="58" x2="100" y2="38" stroke="#A5B4FC" stroke-width="2.5" stroke-linecap="round"/>
+        <circle cx="100" cy="36" r="3" fill="#C7D2FE"/>
+
+        <!-- Crescent moon -->
+        <circle cx="42" cy="38" r="12" fill="#C7D2FE" opacity="0.8"/>
+        <circle cx="47" cy="34" r="11" fill="#070B1A"/>
+
+        <!-- Stars — minimal dots -->
+        <circle cx="155" cy="28" r="1.5" fill="#E0E7FF" opacity="0.65"/>
+        <circle cx="170" cy="50" r="1" fill="#E0E7FF" opacity="0.5"/>
+        <circle cx="75" cy="22" r="1.2" fill="#E0E7FF" opacity="0.55"/>
+        <circle cx="140" cy="18" r="0.8" fill="#E0E7FF" opacity="0.4"/>
+        <circle cx="60" cy="42" r="0.9" fill="#E0E7FF" opacity="0.35"/>
+
+        <!-- Water reflection -->
+        <line x1="80" y1="168" x2="120" y2="168" stroke="#FBBF24" stroke-width="1" opacity="0.15" stroke-dasharray="3 4"/>
+        <line x1="85" y1="174" x2="115" y2="174" stroke="#FBBF24" stroke-width="0.8" opacity="0.08" stroke-dasharray="2 5"/>
+      </svg>
+    </div>
+    <div class="info">
+      <span class="tag">Concept 2</span>
+      <h2>Night Watch</h2>
+      <p>Minimal and geometric — a clean trapezoid tower, a single powerful beam cutting through darkness, and a crescent moon. Stripped to essentials: the light source, the direction, the night. This is WakeLite as a quiet sentinel. It doesn't shout, it just watches — and when the time comes, it shines.</p>
+      <p class="detail">Three-stop horizontal gradient on tower (818CF8 to A5B4FC to 6366F1). Concentric lantern circles: 14px border, 9px glow, 5px core, 2.5px hot center. Single right-facing beam with solid polygon + blurred polygon + center line. Crescent moon via overlapping circles. Dashed water reflection lines. No ornament — pure geometry.</p>
+      <div class="header-preview">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="36" height="36">
+          <circle cx="20" cy="20" r="19" fill="#070B1A" stroke="#312E81" stroke-width="1"/>
+          <polygon points="18,33 17,18 23,18 22,33" fill="#818CF8"/>
+          <rect x="15.5" y="33" width="9" height="2" rx="1" fill="#4338CA"/>
+          <circle cx="20" cy="14" r="5" fill="#1E1B4B" stroke="#6366F1" stroke-width="1"/>
+          <circle cx="20" cy="14" r="3.5" fill="#FBBF24"/>
+          <circle cx="20" cy="14" r="1.8" fill="#FDE68A"/>
+          <line x1="20" y1="9" x2="20" y2="4" stroke="#A5B4FC" stroke-width="1.5" stroke-linecap="round"/>
+          <polygon points="25,14 38,9 38,19" fill="#FBBF24" opacity="0.12"/>
+        </svg>
+        <span class="wordmark">Wake<span>Lite</span></span>
+      </div>
+      <div class="palette">
+        <div class="swatch" style="background:#818CF8"></div>
+        <div class="swatch" style="background:#A5B4FC"></div>
+        <div class="swatch" style="background:#FBBF24"></div>
+        <div class="swatch" style="background:#C7D2FE"></div>
+        <div class="swatch" style="background:#070B1A"></div>
+      </div>
+      <p class="palette-label">Silver-indigo geometry, golden beam, moonlit night</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CONCEPT 3: Storm Keeper -->
+  <!-- ============================================================ -->
+  <div class="concept">
+    <div class="logo-wrap">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="220" height="220">
+        <defs>
+          <radialGradient id="bg3" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#1E1B4B"/>
+            <stop offset="100%" stop-color="#070B1A"/>
+          </radialGradient>
+          <linearGradient id="tower3" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#E0E7FF"/>
+            <stop offset="100%" stop-color="#6366F1"/>
+          </linearGradient>
+          <filter id="stormGlow3"><feGaussianBlur stdDeviation="5"/></filter>
+          <filter id="towerGlow3"><feGaussianBlur stdDeviation="1.5" result="b"/><feComposite in="SourceGraphic" in2="b" operator="over"/></filter>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#bg3)" stroke="#312E81" stroke-width="1.5"/>
+
+        <!-- Storm clouds -->
+        <ellipse cx="55" cy="42" rx="35" ry="16" fill="#1E1B4B" opacity="0.7"/>
+        <ellipse cx="45" cy="38" rx="22" ry="12" fill="#312E81" opacity="0.5"/>
+        <ellipse cx="150" cy="48" rx="30" ry="14" fill="#1E1B4B" opacity="0.6"/>
+        <ellipse cx="155" cy="44" rx="18" ry="10" fill="#312E81" opacity="0.4"/>
+        <ellipse cx="100" cy="34" rx="28" ry="12" fill="#1E1B4B" opacity="0.5"/>
+
+        <!-- Rain lines -->
+        <g stroke="#4338CA" stroke-width="0.6" opacity="0.2">
+          <line x1="30" y1="55" x2="26" y2="75"/>
+          <line x1="42" y1="50" x2="38" y2="70"/>
+          <line x1="160" y1="58" x2="156" y2="78"/>
+          <line x1="172" y1="52" x2="168" y2="72"/>
+          <line x1="35" y1="70" x2="31" y2="90"/>
+          <line x1="165" y1="68" x2="161" y2="88"/>
+        </g>
+
+        <!-- Rough sea -->
+        <path d="M8 160 Q25 150 42 158 Q60 166 78 158 Q96 150 114 158 Q132 166 150 158 Q168 150 186 158 L192 175 L8 175 Z" fill="#1E1B4B" opacity="0.6"/>
+        <path d="M8 165 Q28 157 48 165 Q68 173 88 165 Q108 157 128 165 Q148 173 168 165 Q188 157 200 165" fill="none" stroke="#4338CA" stroke-width="1.2" opacity="0.35"/>
+
+        <!-- Rocky cliff -->
+        <path d="M55 158 L68 140 L78 148 L88 136 L100 142 L112 134 L122 142 L132 138 L145 158 Z" fill="#312E81"/>
+        <path d="M62 158 L72 145 L82 150 L90 140 L100 145 L110 138 L118 145 L128 140 L138 158 Z" fill="#1E1B4B"/>
+
+        <!-- Lighthouse tower -->
+        <path d="M90 142 L87 96 L85 76 L115 76 L113 96 L110 142 Z" fill="url(#tower3)" filter="url(#towerGlow3)"/>
+        <!-- Red stripes -->
+        <rect x="87" y="96" width="26" height="6" fill="#EF4444" opacity="0.55"/>
+        <rect x="88" y="114" width="24" height="6" fill="#EF4444" opacity="0.55"/>
+        <rect x="89" y="130" width="22" height="6" fill="#EF4444" opacity="0.55"/>
+
+        <!-- Lantern room -->
+        <rect x="82" y="64" width="36" height="14" rx="3" fill="#312E81" stroke="#818CF8" stroke-width="1.2"/>
+        <!-- Lantern light (bright despite storm) -->
+        <rect x="85" y="66.5" width="30" height="9" rx="2" fill="#FBBF24" opacity="0.9"/>
+        <rect x="85" y="66.5" width="30" height="9" rx="2" fill="#FDE68A" opacity="0.4"/>
+
+        <!-- Gallery -->
+        <rect x="80" y="62" width="40" height="3" rx="1.5" fill="#A5B4FC"/>
+        <rect x="78" y="78" width="44" height="2.5" rx="1.25" fill="#A5B4FC"/>
+
+        <!-- Dome -->
+        <path d="M88 62 L100 44 L112 62 Z" fill="#818CF8"/>
+        <circle cx="100" cy="44" r="3" fill="#C7D2FE"/>
+
+        <!-- THE BEAM — cutting through storm -->
+        <polygon points="118,71 195,20 195,55" fill="#FBBF24" opacity="0.18" filter="url(#stormGlow3)"/>
+        <polygon points="118,71 195,25 195,50" fill="#FBBF24" opacity="0.12"/>
+        <polygon points="82,71 5,20 5,55" fill="#FBBF24" opacity="0.10" filter="url(#stormGlow3)"/>
+        <polygon points="82,71 5,25 5,50" fill="#FBBF24" opacity="0.06"/>
+
+        <!-- Central glow pushing through -->
+        <circle cx="100" cy="71" r="22" fill="#FBBF24" opacity="0.06" filter="url(#stormGlow3)"/>
+        <circle cx="100" cy="71" r="14" fill="#FBBF24" opacity="0.1" filter="url(#stormGlow3)"/>
+
+        <!-- Lightning bolt in sky -->
+        <polyline points="52,30 48,42 54,40 46,58" fill="none" stroke="#FBBF24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+      </svg>
+    </div>
+    <div class="info">
+      <span class="tag">Concept 3</span>
+      <h2>Storm Keeper</h2>
+      <p>The lighthouse stands firm on a cliff while a storm rages — clouds, rain, rough seas, even lightning. But the beam cuts through regardless. This is WakeLite's promise: your timers fire no matter what. Crash recovery, WAL journaling, launchd KeepAlive — the light stays on through every storm.</p>
+      <p class="detail">Five storm cloud ellipses at varying opacity. Six angled rain lines. Rough sea with filled wave polygon + stroke wave path. Jagged cliff with two-layer rocks. Three red tower stripes. Dual beams with both soft-glow and sharp-edge polygons. Lightning polyline in sky. Central glow persists through storm haze at low opacity — the signal is weakened but never extinguished.</p>
+      <div class="header-preview">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="36" height="36">
+          <circle cx="20" cy="20" r="19" fill="#070B1A" stroke="#312E81" stroke-width="1"/>
+          <ellipse cx="12" cy="10" rx="8" ry="4" fill="#1E1B4B" opacity="0.6"/>
+          <ellipse cx="30" cy="12" rx="7" ry="3.5" fill="#1E1B4B" opacity="0.5"/>
+          <path d="M16 33 L17.2 18 L17 14 L23 14 L22.8 18 L24 33 Z" fill="#A5B4FC"/>
+          <rect x="17" y="20" width="6" height="2" fill="#EF4444" opacity="0.5"/>
+          <rect x="17" y="26" width="6" height="2" fill="#EF4444" opacity="0.5"/>
+          <rect x="15.5" y="11" width="9" height="4" rx="1" fill="#312E81" stroke="#818CF8" stroke-width="0.5"/>
+          <rect x="16.5" y="12" width="7" height="2.5" rx="0.5" fill="#FBBF24" opacity="0.9"/>
+          <path d="M17.5 11 L20 5 L22.5 11 Z" fill="#818CF8"/>
+          <polygon points="24.5,13 37,7 37,17" fill="#FBBF24" opacity="0.15"/>
+          <circle cx="20" cy="13" r="5" fill="#FBBF24" opacity="0.08"/>
+        </svg>
+        <span class="wordmark">Wake<span>Lite</span></span>
+      </div>
+      <div class="palette">
+        <div class="swatch" style="background:#6366F1"></div>
+        <div class="swatch" style="background:#E0E7FF"></div>
+        <div class="swatch" style="background:#FBBF24"></div>
+        <div class="swatch" style="background:#EF4444"></div>
+        <div class="swatch" style="background:#070B1A"></div>
+      </div>
+      <p class="palette-label">White-indigo tower, amber beam through storm, red stripes</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CONCEPT 4: Harbor Light — Warm & Inviting -->
+  <!-- ============================================================ -->
+  <div class="concept">
+    <div class="logo-wrap">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="220" height="220">
+        <defs>
+          <linearGradient id="sky4" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#070B1A"/>
+            <stop offset="60%" stop-color="#1E1B4B"/>
+            <stop offset="100%" stop-color="#312E81"/>
+          </linearGradient>
+          <linearGradient id="tower4" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#F9FAFB"/>
+            <stop offset="100%" stop-color="#A5B4FC"/>
+          </linearGradient>
+          <radialGradient id="warmGlow4" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#FBBF24" stop-opacity="0.35"/>
+            <stop offset="50%" stop-color="#F59E0B" stop-opacity="0.1"/>
+            <stop offset="100%" stop-color="#F59E0B" stop-opacity="0"/>
+          </radialGradient>
+          <filter id="softG4"><feGaussianBlur stdDeviation="4"/></filter>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#sky4)" stroke="#312E81" stroke-width="1.5"/>
+
+        <!-- Warm ambient glow behind lighthouse -->
+        <circle cx="100" cy="68" r="55" fill="url(#warmGlow4)"/>
+        <circle cx="100" cy="68" r="35" fill="#FBBF24" opacity="0.05" filter="url(#softG4)"/>
+
+        <!-- Calm water -->
+        <rect x="4" y="152" width="192" height="44" rx="0" fill="#0F0A2E" opacity="0.6"/>
+        <path d="M10 155 Q35 150 60 155 Q85 160 110 155 Q135 150 160 155 Q185 160 196 155" fill="none" stroke="#4338CA" stroke-width="1" opacity="0.3"/>
+
+        <!-- Water reflection of light -->
+        <ellipse cx="100" cy="165" rx="25" ry="8" fill="#FBBF24" opacity="0.06"/>
+        <line x1="92" y1="160" x2="108" y2="160" stroke="#FBBF24" stroke-width="1.2" opacity="0.12" stroke-dasharray="3 3"/>
+        <line x1="88" y1="166" x2="112" y2="166" stroke="#FBBF24" stroke-width="0.8" opacity="0.08" stroke-dasharray="2 4"/>
+        <line x1="94" y1="172" x2="106" y2="172" stroke="#FBBF24" stroke-width="0.6" opacity="0.05" stroke-dasharray="2 5"/>
+
+        <!-- Small dock / pier -->
+        <rect x="135" y="150" width="40" height="3" rx="1" fill="#4338CA" opacity="0.5"/>
+        <rect x="145" y="148" width="2" height="8" fill="#4338CA" opacity="0.4"/>
+        <rect x="165" y="148" width="2" height="8" fill="#4338CA" opacity="0.4"/>
+
+        <!-- Little boat at dock -->
+        <path d="M150 148 Q155 145 160 148 L158 148 Q155 146.5 152 148 Z" fill="#818CF8" opacity="0.5"/>
+
+        <!-- Ground -->
+        <path d="M65 152 L75 146 L85 150 L95 144 L105 148 L115 142 L125 148 L135 152 Z" fill="#312E81"/>
+
+        <!-- Lighthouse tower — warm white -->
+        <path d="M91 146 L88 98 L86 80 L114 80 L112 98 L109 146 Z" fill="url(#tower4)"/>
+        <!-- Subtle door -->
+        <rect x="95" y="134" width="10" height="14" rx="5" fill="#4338CA" opacity="0.4"/>
+        <!-- Window -->
+        <circle cx="100" cy="112" r="4" fill="#1E1B4B" stroke="#C7D2FE" stroke-width="0.8"/>
+        <line x1="100" y1="108" x2="100" y2="116" stroke="#C7D2FE" stroke-width="0.4" opacity="0.5"/>
+        <line x1="96" y1="112" x2="104" y2="112" stroke="#C7D2FE" stroke-width="0.4" opacity="0.5"/>
+
+        <!-- Lantern room -->
+        <rect x="82" y="68" width="36" height="14" rx="3" fill="#1E1B4B" stroke="#A5B4FC" stroke-width="1"/>
+        <!-- Warm glowing windows -->
+        <rect x="84.5" y="70" width="6.5" height="10" rx="1.5" fill="#FBBF24"/>
+        <rect x="93" y="70" width="6.5" height="10" rx="1.5" fill="#FDE68A"/>
+        <rect x="101.5" y="70" width="6.5" height="10" rx="1.5" fill="#FBBF24"/>
+        <rect x="110" y="70" width="6.5" height="10" rx="1.5" fill="#FDE68A" opacity="0.8"/>
+        <!-- Gallery -->
+        <rect x="80" y="66" width="40" height="3" rx="1.5" fill="#C7D2FE"/>
+        <rect x="78" y="82" width="44" height="2.5" rx="1.25" fill="#C7D2FE"/>
+
+        <!-- Dome and finial -->
+        <path d="M87 66 L100 50 L113 66 Z" fill="#A5B4FC"/>
+        <line x1="100" y1="50" x2="100" y2="40" stroke="#C7D2FE" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="100" cy="38" r="3" fill="#E0E7FF"/>
+
+        <!-- Soft omnidirectional glow (harbor light, not searchlight) -->
+        <circle cx="100" cy="75" r="30" fill="#FBBF24" opacity="0.08" filter="url(#softG4)"/>
+        <circle cx="100" cy="75" r="18" fill="#FBBF24" opacity="0.14" filter="url(#softG4)"/>
+        <circle cx="100" cy="75" r="8" fill="#FDE68A" opacity="0.25"/>
+
+        <!-- Stars -->
+        <circle cx="28" cy="24" r="1.5" fill="#E0E7FF" opacity="0.7"/>
+        <circle cx="172" cy="20" r="1.3" fill="#E0E7FF" opacity="0.6"/>
+        <circle cx="50" cy="14" r="1" fill="#E0E7FF" opacity="0.5"/>
+        <circle cx="150" cy="32" r="1.2" fill="#E0E7FF" opacity="0.45"/>
+        <circle cx="38" cy="48" r="0.8" fill="#E0E7FF" opacity="0.35"/>
+        <circle cx="168" cy="44" r="0.9" fill="#E0E7FF" opacity="0.4"/>
+      </svg>
+    </div>
+    <div class="info">
+      <span class="tag">Concept 4</span>
+      <h2>Harbor Light</h2>
+      <p>Warm and inviting — the lighthouse glows softly over calm waters, its light reflecting on the harbor surface. A small boat is moored at a pier, safely home. No sweeping beam — instead, an omnidirectional warmth. This is WakeLite as the place your tasks come home to. The safe harbor after the schedule runs.</p>
+      <p class="detail">White-to-lavender tower gradient (F9FAFB to A5B4FC). Four lantern panels alternating FBBF24/FDE68A for warmth. Omnidirectional glow in three layers (r=30/18/8). Water reflection: ellipse + three dashed lines at decreasing opacity. Pier with two posts and a tiny boat silhouette. Round cross-pane window. Arched door. Three-stop sky gradient (night to deep indigo).</p>
+      <div class="header-preview">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="36" height="36">
+          <circle cx="20" cy="20" r="19" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+          <path d="M17.5 33 L17 18 L16.5 14 L23.5 14 L23 18 L22.5 33 Z" fill="#E0E7FF"/>
+          <rect x="15" y="11" width="10" height="4" rx="1" fill="#1E1B4B" stroke="#A5B4FC" stroke-width="0.5"/>
+          <rect x="16" y="11.8" width="3.2" height="2.5" rx="0.5" fill="#FBBF24"/>
+          <rect x="20" y="11.8" width="3.2" height="2.5" rx="0.5" fill="#FDE68A"/>
+          <path d="M17 11 L20 5.5 L23 11 Z" fill="#A5B4FC"/>
+          <circle cx="20" cy="4" r="1.5" fill="#E0E7FF"/>
+          <circle cx="20" cy="13" r="7" fill="#FBBF24" opacity="0.1"/>
+          <circle cx="20" cy="13" r="4" fill="#FBBF24" opacity="0.15"/>
+          <rect x="4" y="33" width="32" height="4" fill="#0F0A2E" opacity="0.5"/>
+          <ellipse cx="20" cy="35.5" rx="6" ry="2" fill="#FBBF24" opacity="0.06"/>
+        </svg>
+        <span class="wordmark">Wake<span>Lite</span></span>
+      </div>
+      <div class="palette">
+        <div class="swatch" style="background:#F9FAFB"></div>
+        <div class="swatch" style="background:#A5B4FC"></div>
+        <div class="swatch" style="background:#FBBF24"></div>
+        <div class="swatch" style="background:#FDE68A"></div>
+        <div class="swatch" style="background:#070B1A"></div>
+      </div>
+      <p class="palette-label">White tower, warm amber glow, calm harbor night</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CONCEPT 5: Signal Tower — Tech / Circuit -->
+  <!-- ============================================================ -->
+  <div class="concept">
+    <div class="logo-wrap">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="220" height="220">
+        <defs>
+          <radialGradient id="bg5" cx="50%" cy="40%" r="55%">
+            <stop offset="0%" stop-color="#1E1B4B"/>
+            <stop offset="100%" stop-color="#070B1A"/>
+          </radialGradient>
+          <linearGradient id="tower5" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#818CF8"/>
+            <stop offset="100%" stop-color="#4338CA"/>
+          </linearGradient>
+          <filter id="neonG5"><feGaussianBlur stdDeviation="3" result="b"/><feComposite in="SourceGraphic" in2="b" operator="over"/></filter>
+          <filter id="bigG5"><feGaussianBlur stdDeviation="6"/></filter>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#bg5)" stroke="#312E81" stroke-width="1.5"/>
+
+        <!-- Circuit board traces from tower -->
+        <g stroke="#4338CA" stroke-width="1" fill="none" opacity="0.35">
+          <!-- Left traces -->
+          <polyline points="85,100 70,100 70,85 50,85"/>
+          <polyline points="85,115 65,115 65,130 45,130"/>
+          <polyline points="85,130 75,130 75,145 55,145"/>
+          <polyline points="70,85 70,75 55,75"/>
+          <!-- Right traces -->
+          <polyline points="115,100 130,100 130,85 150,85"/>
+          <polyline points="115,115 135,115 135,130 155,130"/>
+          <polyline points="115,130 125,130 125,145 145,145"/>
+          <polyline points="130,85 130,75 145,75"/>
+        </g>
+        <!-- Circuit nodes -->
+        <g fill="#6366F1" opacity="0.5">
+          <circle cx="50" cy="85" r="2.5"/>
+          <circle cx="45" cy="130" r="2.5"/>
+          <circle cx="55" cy="145" r="2.5"/>
+          <circle cx="55" cy="75" r="2.5"/>
+          <circle cx="150" cy="85" r="2.5"/>
+          <circle cx="155" cy="130" r="2.5"/>
+          <circle cx="145" cy="145" r="2.5"/>
+          <circle cx="145" cy="75" r="2.5"/>
+        </g>
+        <!-- Active nodes (pulsing amber — connected timers) -->
+        <circle cx="50" cy="85" r="2.5" fill="#FBBF24" opacity="0.7" filter="url(#neonG5)"/>
+        <circle cx="150" cy="85" r="2.5" fill="#FBBF24" opacity="0.7" filter="url(#neonG5)"/>
+        <circle cx="155" cy="130" r="2.5" fill="#FBBF24" opacity="0.5" filter="url(#neonG5)"/>
+
+        <!-- Tower — clean modern -->
+        <path d="M90 155 L87 98 L85 78 L115 78 L113 98 L110 155 Z" fill="url(#tower5)" filter="url(#neonG5)"/>
+        <!-- Tower LED strips -->
+        <rect x="87" y="98" width="26" height="2" fill="#818CF8" opacity="0.6"/>
+        <rect x="88" y="112" width="24" height="2" fill="#818CF8" opacity="0.6"/>
+        <rect x="88" y="126" width="24" height="2" fill="#818CF8" opacity="0.6"/>
+        <rect x="89" y="140" width="22" height="2" fill="#818CF8" opacity="0.6"/>
+
+        <!-- Lantern — hexagonal tech -->
+        <polygon points="100,56 118,64 118,80 100,88 82,80 82,64" fill="#1E1B4B" stroke="#6366F1" stroke-width="1.5"/>
+        <!-- Inner hex -->
+        <polygon points="100,60 113,66 113,78 100,84 87,78 87,66" fill="none" stroke="#818CF8" stroke-width="0.8" opacity="0.4"/>
+        <!-- Core light -->
+        <circle cx="100" cy="72" r="10" fill="#FBBF24" opacity="0.8" filter="url(#neonG5)"/>
+        <circle cx="100" cy="72" r="6" fill="#FDE68A"/>
+        <circle cx="100" cy="72" r="3" fill="#FFF7ED"/>
+
+        <!-- Signal rings emanating -->
+        <circle cx="100" cy="72" r="25" fill="none" stroke="#FBBF24" stroke-width="1" opacity="0.18"/>
+        <circle cx="100" cy="72" r="35" fill="none" stroke="#FBBF24" stroke-width="0.8" opacity="0.12"/>
+        <circle cx="100" cy="72" r="45" fill="none" stroke="#FBBF24" stroke-width="0.6" opacity="0.08"/>
+
+        <!-- Antenna / finial -->
+        <line x1="100" y1="56" x2="100" y2="38" stroke="#A5B4FC" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="100" cy="36" r="3" fill="#818CF8" filter="url(#neonG5)"/>
+        <!-- Antenna crossbars -->
+        <line x1="94" y1="42" x2="106" y2="42" stroke="#6366F1" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="96" y1="46" x2="104" y2="46" stroke="#6366F1" stroke-width="1" stroke-linecap="round"/>
+
+        <!-- Base platform -->
+        <rect x="76" y="155" width="48" height="4" rx="2" fill="#4338CA"/>
+        <rect x="72" y="159" width="56" height="3" rx="1.5" fill="#312E81"/>
+
+        <!-- Ambient glow -->
+        <circle cx="100" cy="72" r="50" fill="#FBBF24" opacity="0.03" filter="url(#bigG5)"/>
+      </svg>
+    </div>
+    <div class="info">
+      <span class="tag">Concept 5</span>
+      <h2>Signal Tower</h2>
+      <p>The lighthouse reimagined as a digital signal tower — circuit traces radiate from the base to connected timer nodes. A hexagonal lantern room pulses with amber light, sending signal rings outward. Active nodes glow gold (connected timers), dormant ones stay indigo. This is WakeLite as infrastructure: a central control tower in a network of scheduled operations.</p>
+      <p class="detail">Eight symmetric circuit traces with polylines. Eight endpoint nodes (three active in amber with neon glow, five dormant in indigo). Hexagonal lantern room (outer + inner hex). Triple concentric signal rings at 18%/12%/8%. Tower has four horizontal LED strip accents. Antenna finial with two crossbars. Core light: three concentric circles (FBBF24 > FDE68A > FFF7ED). Neon glow filter on tower and active nodes.</p>
+      <div class="header-preview">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="36" height="36">
+          <circle cx="20" cy="20" r="19" fill="#070B1A" stroke="#312E81" stroke-width="1"/>
+          <path d="M18 33 L17.2 18 L16.5 14 L23.5 14 L22.8 18 L22 33 Z" fill="#4338CA"/>
+          <rect x="17" y="20" width="6" height="1" fill="#818CF8" opacity="0.5"/>
+          <rect x="17" y="25" width="6" height="1" fill="#818CF8" opacity="0.5"/>
+          <polygon points="20,8 27,11.5 27,18.5 20,22 13,18.5 13,11.5" fill="#1E1B4B" stroke="#6366F1" stroke-width="0.8"/>
+          <circle cx="20" cy="15" r="4" fill="#FBBF24" opacity="0.8"/>
+          <circle cx="20" cy="15" r="2.2" fill="#FDE68A"/>
+          <circle cx="20" cy="15" r="8" fill="none" stroke="#FBBF24" stroke-width="0.5" opacity="0.2"/>
+          <circle cx="20" cy="15" r="12" fill="none" stroke="#FBBF24" stroke-width="0.4" opacity="0.12"/>
+          <line x1="13" y1="18" x2="6" y2="18" stroke="#4338CA" stroke-width="0.6" opacity="0.3"/>
+          <line x1="27" y1="18" x2="34" y2="18" stroke="#4338CA" stroke-width="0.6" opacity="0.3"/>
+          <circle cx="5" cy="18" r="1.2" fill="#FBBF24" opacity="0.5"/>
+          <circle cx="35" cy="18" r="1.2" fill="#FBBF24" opacity="0.5"/>
+        </svg>
+        <span class="wordmark">Wake<span>Lite</span></span>
+      </div>
+      <div class="palette">
+        <div class="swatch" style="background:#4338CA"></div>
+        <div class="swatch" style="background:#818CF8"></div>
+        <div class="swatch" style="background:#FBBF24"></div>
+        <div class="swatch" style="background:#FFF7ED"></div>
+        <div class="swatch" style="background:#070B1A"></div>
+      </div>
+      <p class="palette-label">Indigo circuits, amber signal nodes, hexagonal tech</p>
+    </div>
+  </div>
+
+</div>
+
+<div style="text-align:center; margin-top:48px; color:#4338CA; font-size:12px;">
+  WakeLite 2.0.0 &mdash; A lighthouse for your machine. Always on. Reliability-first.
+</div>
+
+</body>
+</html>

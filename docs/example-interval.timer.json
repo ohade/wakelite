@@ -1,0 +1,35 @@
+{
+  "name": "example-interval",
+  "comment": "Example interval timer — runs every 30 seconds",
+  "enabled": true,
+  "timer_type": "scheduled",
+  "recurrence": {
+    "frequency": "interval",
+    "every": "30s"
+  },
+  "execution": {
+    "overlap": "skip"
+  },
+  "resources": [
+    {
+      "name": "example-api",
+      "description": "Example external API",
+      "capacity": "60 req/min",
+      "estimated_usage": "2 req/min"
+    }
+  ],
+  "command": {
+    "mode": "shell",
+    "shell": "echo \"tick at $(date)\" >> /tmp/wakelite-interval-test.log",
+    "workingDirectory": "/Users/<user>/git"
+  },
+  "wake": {
+    "enabled": false,
+    "action": "wake",
+    "leadMinutes": 0
+  },
+  "notifications": {
+    "onSuccess": false,
+    "onFailure": true
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "example-daily-task",
+  "comment": "Example timer — runs echo hello every day at 01:55",
+  "enabled": true,
+  "recurrence": {
+    "frequency": "daily",
+    "time": "01:55",
+    "interval": 1
+  },
+  "command": {
+    "mode": "shell",
+    "shell": "echo hello from wakelite",
+    "workingDirectory": "/Users/<user>/git"
+  },
+  "wake": {
+    "enabled": true,
+    "action": "wake",
+    "leadMinutes": 2
+  },
+  "notifications": {
+    "onSuccess": false,
+    "onFailure": true
+  }
+}
