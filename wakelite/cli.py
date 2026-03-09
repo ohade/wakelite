@@ -70,6 +70,15 @@ def _cmd_timer_list(args: argparse.Namespace) -> None:
 
 def _cmd_timer_create(args: argparse.Namespace) -> None:
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    # Auto-capture WezTerm pane_id if callback is present but pane_id missing
+    cb = payload.get("callback")
+    if cb and cb.get("pane_id") is None:
+        wezterm_pane = os.environ.get("WEZTERM_PANE")
+        if wezterm_pane:
+            try:
+                cb["pane_id"] = int(wezterm_pane)
+            except (ValueError, TypeError):
+                pass
     payload["idempotency_key"] = args.idempotency_key
     _print_json(_api_call("POST", "/v1/timers", payload))
 
@@ -307,6 +316,11 @@ def main() -> None:
   "notifications": {                            # optional
     "onSuccess": false,
     "onFailure": true
+  },
+  "callback": {                                 # optional — reconnect results to terminal
+    "type": "wezterm",                          #   only "wezterm" supported (v1)
+    "pane_id": 11,                              #   auto-captured from $WEZTERM_PANE if missing
+    "session_id": "abc-def-123"                 #   Claude Code session for --resume fallback
   }
 }
 

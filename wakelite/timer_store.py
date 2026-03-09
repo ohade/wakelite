@@ -10,7 +10,7 @@ from .recurrence import parse_recurrence, parse_time, RecurrenceError
 from .utils import atomic_write_json, read_json
 
 
-ALLOWED_PAYLOAD_KEYS = {"name", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "comment", "id", "timer_type", "execution", "resources", "max_runs", "until"}
+ALLOWED_PAYLOAD_KEYS = {"name", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "comment", "id", "timer_type", "execution", "resources", "max_runs", "until", "callback"}
 ALLOWED_WAKE_KEYS = {"enabled", "action", "leadMinutes"}
 ALLOWED_EXECUTION_KEYS = {"overlap", "max_concurrent", "restart_on_failure", "restart_delay_seconds", "restart_max_backoff_seconds"}
 ALLOWED_OVERLAP_VALUES = {"skip", "queue", "allow"}
@@ -128,6 +128,20 @@ class TimerStore:
                         f"'until.{field}' is required and must be 'delete' or 'continue'"
                     )
 
+        callback = timer.get("callback")
+        if callback is not None:
+            if not isinstance(callback, dict):
+                raise ValueError("callback must be an object")
+            cb_type = callback.get("type")
+            if cb_type != "wezterm":
+                raise ValueError("callback.type must be 'wezterm' (only supported type)")
+            pane_id = callback.get("pane_id")
+            if pane_id is not None and not isinstance(pane_id, int):
+                raise ValueError("callback.pane_id must be an integer")
+            session_id = callback.get("session_id")
+            if session_id is not None and not isinstance(session_id, str):
+                raise ValueError("callback.session_id must be a string")
+
         active_hours = timer.get("recurrence", {}).get("active_hours")
         if active_hours:
             freq = timer.get("recurrence", {}).get("frequency")
@@ -170,6 +184,7 @@ class TimerStore:
                 "resources": payload.get("resources", []),
                 "max_runs": payload.get("max_runs"),
                 "until": payload.get("until"),
+                "callback": payload.get("callback"),
                 "wake": payload.get(
                     "wake",
                     {"enabled": False, "action": "wake", "leadMinutes": 0},
@@ -192,7 +207,7 @@ class TimerStore:
                 if timer["id"] != timer_id:
                     continue
                 updated = dict(timer)
-                for key in ("name", "comment", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "timer_type", "execution", "resources", "max_runs", "until"):
+                for key in ("name", "comment", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "timer_type", "execution", "resources", "max_runs", "until", "callback"):
                     if key in patch:
                         updated[key] = patch[key]
                 updated["updated_at"] = datetime.now(timezone.utc).isoformat()

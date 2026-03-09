@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import traceback
 from dataclasses import dataclass
@@ -190,9 +191,19 @@ def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     if name == "wakelite.v1.timer.list":
         return _api_request("GET", "/v1/timers")
     if name == "wakelite.v1.timer.create":
+        timer_payload = dict(arguments.get("timer", {}))
+        # Auto-capture WezTerm pane_id if callback is present but pane_id missing
+        cb = timer_payload.get("callback")
+        if cb and cb.get("pane_id") is None:
+            wezterm_pane = os.environ.get("WEZTERM_PANE")
+            if wezterm_pane:
+                try:
+                    cb["pane_id"] = int(wezterm_pane)
+                except (ValueError, TypeError):
+                    pass
         return _api_request("POST", "/v1/timers", {
             "idempotency_key": arguments["idempotency_key"],
-            **arguments.get("timer", {}),
+            **timer_payload,
         })
     if name == "wakelite.v1.timer.update":
         timer_id = arguments["timer_id"]

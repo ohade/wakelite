@@ -118,6 +118,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                         button.secondary:hover { background: #3730A3; }
                         button.danger { background: #b91c1c; }
                         button.danger:hover { background: #991b1b; }
+                        .row-delete-btn { background: #b91c1c; color: #fff; border: none; border-radius: 4px; width: 22px; height: 22px; font-size: 14px; line-height: 1; cursor: pointer; padding: 0; }
+                        .row-delete-btn:hover { background: #991b1b; }
                         .full { grid-column: 1 / -1; }
                         .status { font-size: 12px; white-space: pre-wrap; color: #C7D2FE; }
                         .group { padding: 10px; border: 1px solid #312E81; border-radius: 8px; background: #1E1B4B; }
@@ -354,7 +356,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                       </div>
                       <div class="card">
                         <h2>Timers</h2>
-                        <table id="timers"><thead><tr><th>Name</th><th>Type</th><th>Repeat</th><th>Enabled</th><th>Resources</th><th>Next Run</th></tr></thead><tbody></tbody></table>
+                        <table id="timers"><thead><tr><th>Name</th><th>Type</th><th>Repeat</th><th>Enabled</th><th>Resources</th><th>Next Run</th><th></th></tr></thead><tbody></tbody></table>
                         <div class="small-note">Tip: click a timer row to open details, run-now test, edit, and logs.</div>
                       </div>
                       <div class="card">
@@ -371,6 +373,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           <div class="modal-actions">
                             <button id="modalRunNow">Run Now</button>
                             <button id="modalAbort" class="danger hidden">Abort</button>
+                            <button id="modalDelete" class="danger hidden">Delete</button>
                             <button id="modalEdit" class="secondary">Edit</button>
                             <button id="modalSave" class="hidden">Save</button>
                             <button id="modalCancel" class="secondary hidden">Cancel</button>
@@ -612,6 +615,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           el('modalEditWrap').classList.toggle('hidden', !editMode);
                           el('modalEdit').classList.toggle('hidden', editMode);
                           el('modalRunNow').classList.toggle('hidden', editMode || !activeTimerId);
+                          el('modalDelete').classList.toggle('hidden', editMode || !activeTimerId);
                           el('modalSave').classList.toggle('hidden', !editMode);
                           el('modalCancel').classList.toggle('hidden', !editMode);
                           refreshAbortButton();
@@ -905,8 +909,35 @@ class ApiHandler(BaseHTTPRequestHandler):
                             `Run ${run.run_id || runId} | ${displayStatus(run)} | Scheduled ${run.scheduled_at || ''}${suffix}`;
                           setRunLiveIndicator(isRunning);
                           refreshAbortButton();
-                          el('modalStdout').textContent = payload.stdout || '';
-                          el('modalStderr').textContent = payload.stderr || '';
+                          const stdout = payload.stdout || '';
+                          const stderr = payload.stderr || '';
+                          el('modalStdout').textContent = stdout;
+                          el('modalStderr').textContent = stderr;
+                          // Show useful context when both logs are empty and run is terminal
+                          if (!stdout.trim() && !stderr.trim() && run.status && run.status !== 'started') {
+                            let ctx = '(no output produced)\\n\\n--- Run Context ---\\n';
+                            ctx += 'Status: ' + displayStatus(run) + '\\n';
+                            ctx += 'Exit code: ' + (run.exit_code != null ? run.exit_code : 'N/A') + '\\n';
+                            ctx += 'Scheduled: ' + (run.scheduled_at || 'N/A') + '\\n';
+                            ctx += 'Started: ' + (run.started_at || 'N/A') + '\\n';
+                            ctx += 'Finished: ' + (run.finished_at || 'N/A') + '\\n';
+                            if (run.started_at && run.finished_at) {
+                              const dur = (new Date(run.finished_at) - new Date(run.started_at)) / 1000;
+                              ctx += 'Duration: ' + dur.toFixed(1) + 's\\n';
+                            }
+                            if (run.timer_snapshot) {
+                              try {
+                                const snap = JSON.parse(run.timer_snapshot);
+                                const cmd = snap.command || {};
+                                ctx += '\\n--- Command ---\\n';
+                                if (cmd.mode === 'shell') ctx += 'Shell: ' + (cmd.shell || 'N/A') + '\\n';
+                                else ctx += 'Executable: ' + (cmd.executable || 'N/A') + ' ' + (cmd.args || []).join(' ') + '\\n';
+                                if (cmd.workingDirectory) ctx += 'Working dir: ' + cmd.workingDirectory + '\\n';
+                              } catch(e) {}
+                            }
+                            if (run.message) ctx += '\\nMessage: ' + run.message + '\\n';
+                            el('modalStdout').textContent = ctx;
+                          }
                         }
 
                         async function pollRunUntilTerminal(timerId, scheduledAt) {
@@ -1005,6 +1036,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           activeTimerId = null;
                           setDialogEditMode(false);
                           el('modalRunNow').classList.add('hidden');
+                          el('modalDelete').classList.add('hidden');
                           el('modalEdit').classList.add('hidden');
                           el('modalTitle').textContent = run.timer_name || 'Deleted timer';
                           if (run.timer_snapshot) {
@@ -1102,6 +1134,24 @@ class ApiHandler(BaseHTTPRequestHandler):
                           await load();
                         }
 
+                        async function deleteTimerFromDialog() {
+                          if (!activeTimerId) return;
+                          const timerName = (timerById[activeTimerId] || {}).name || activeTimerId;
+                          if (!confirm(`Delete timer "${timerName}"? This cannot be undone.`)) return;
+                          const resp = await fetch(`/v1/timers/${activeTimerId}`, {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ idempotency_key: buildIdempotencyKey() }),
+                          });
+                          const data = await resp.json().catch(() => ({}));
+                          if (!resp.ok) {
+                            el('modalStatus').textContent = `delete failed: ${data.error || 'unknown error'}`;
+                            return;
+                          }
+                          closeModal();
+                          await load();
+                        }
+
                         function describeRepeat(t) {
                           const r = t.recurrence || {};
                           const f = r.frequency;
@@ -1165,6 +1215,24 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                             const tdRes = document.createElement('td'); tdRes.textContent = describeResources(t); tr.appendChild(tdRes);
                             const tdNext = document.createElement('td'); tdNext.textContent = t.next_run || ''; tr.appendChild(tdNext);
+                            const tdDel = document.createElement('td');
+                            tdDel.style.textAlign = 'center';
+                            const delBtn = document.createElement('button');
+                            delBtn.className = 'row-delete-btn';
+                            delBtn.textContent = '\\u00d7';
+                            delBtn.title = 'Delete timer';
+                            delBtn.addEventListener('click', async (e) => {
+                              e.stopPropagation();
+                              if (!confirm('Delete timer "' + t.name + '"? This cannot be undone.')) return;
+                              const resp = await fetch('/v1/timers/' + t.id, {
+                                method: 'DELETE',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ idempotency_key: buildIdempotencyKey() }),
+                              });
+                              if (resp.ok) await load();
+                            });
+                            tdDel.appendChild(delBtn);
+                            tr.appendChild(tdDel);
                             tr.addEventListener('click', () => openTimerDialog(t.id));
                             tBody.appendChild(tr);
                           }
@@ -1211,6 +1279,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         document.getElementById('modalSave').addEventListener('click', saveTimerEdits);
                         document.getElementById('modalRunNow').addEventListener('click', runNowFromDialog);
                         document.getElementById('modalAbort').addEventListener('click', abortRunFromDialog);
+                        document.getElementById('modalDelete').addEventListener('click', deleteTimerFromDialog);
                         document.getElementById('editFrequency').addEventListener('change', updateEditRecurrenceVisibility);
                         document.getElementById('editMonthlyMode').addEventListener('change', updateEditRecurrenceVisibility);
                         document.getElementById('editCommandMode').addEventListener('change', updateEditCommandVisibility);
@@ -1282,6 +1351,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 idem_key = self._require_idempotency(body)
                 payload = {k: v for k, v in body.items() if k != "idempotency_key"}
+                # Auto-capture WezTerm pane_id if callback is present but pane_id missing
+                cb = payload.get("callback")
+                if cb and cb.get("pane_id") is None:
+                    wezterm_pane = os.environ.get("WEZTERM_PANE")
+                    if wezterm_pane:
+                        try:
+                            cb["pane_id"] = int(wezterm_pane)
+                        except (ValueError, TypeError):
+                            pass
                 self._send_json(200, self.service.create_timer(payload, idem_key))
                 return
 

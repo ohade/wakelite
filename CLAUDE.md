@@ -103,6 +103,31 @@ The runner runs as a launchd user agent (`com.wakelite.runner`). After code chan
 
 The reconciler runs as a system-level launchd daemon (requires `sudo` to install).
 
+## Monitor script conventions
+
+Monitor/polling scripts MUST produce stdout describing what they're doing. Silent scripts make debugging impossible — even when exit codes are correct, empty logs give zero visibility into what happened.
+
+1. **Echo what you're checking**: `echo "Checking PR-98729 build #9 status..."`
+2. **Echo the result**: `echo "Build status: $STATUS"`
+3. **Echo exit reason before exit 75**: `echo "Not ready yet — status=$STATUS"`
+4. **Exit codes**: `0` = done/success, `75` = not ready (waiting), `1` = error
+
+Example:
+```bash
+#!/bin/bash
+echo "Checking PR-98729 build #9..."
+STATUS=$(jk get-build-status 98729 9)
+echo "Build status: $STATUS"
+if [ "$STATUS" = "SUCCESS" ]; then
+    echo "Build completed successfully"
+    exit 0
+fi
+echo "Build still running — will check again"
+exit 75
+```
+
+Note: Even if a script produces no output, the web UI will show run context (command, exit code, timestamps) — but explicit logging is always preferred.
+
 ## Key gotchas
 
 - **Interval format is single-unit only.** `5h2m` is rejected — use `302m` instead.

@@ -32,14 +32,16 @@ class Notifier:
         """Send a Slack DM. Not gated by self.muted — Slack is always-on.
 
         Never raises — logs errors and returns silently.
+        All messages get a branded WakeLite header automatically.
         """
+        branded = f":zap: *WakeLite*\n───\n{text}"
         try:
             config_path = Path.home() / ".claude.json"
             with open(config_path) as f:
                 token = json.load(f)["mcpServers"]["slack"]["env"]["SLACK_BOT_TOKEN"]
             payload = json.dumps({
                 "channel": channel,
-                "text": text,
+                "text": branded,
                 "unfurl_links": False,
             }).encode()
             req = urllib.request.Request(

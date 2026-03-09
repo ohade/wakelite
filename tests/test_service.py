@@ -1,8 +1,10 @@
 import importlib
+import json
 import os
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -929,6 +931,122 @@ class WaitingStatusTests(unittest.TestCase):
 
             completed = svc.state.count_completed_runs(timer["id"])
             self.assertEqual(completed, 0)
+
+
+def _callback_timer(name: str, shell: str = "echo callback-ok", pane_id: int = 42, session_id: str = "sess-123"):
+    t = _basic_timer(name, shell)
+    t["callback"] = {"type": "wezterm", "pane_id": pane_id, "session_id": session_id}
+    return t
+
+
+class CallbackTests(unittest.TestCase):
+    """Tests for the WezTerm callback feature."""
+
+    def test_callback_fires_on_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _callback_timer("cb-success", "echo hello-from-timer")
+            )
+
+            pane_list_json = json.dumps([{"pane_id": 42, "title": "test"}])
+            with patch("wakelite.service.subprocess.run") as mock_run:
+                # Mock wezterm cli list returning our pane
+                mock_run.return_value = unittest.mock.Mock(
+                    returncode=0, stdout=pane_list_json, stderr=""
+                )
+                svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.0)
+
+                # Verify wezterm cli send-text was called
+                send_calls = [c for c in mock_run.call_args_list if "send-text" in str(c)]
+                self.assertTrue(len(send_calls) >= 1, f"Expected send-text calls, got: {mock_run.call_args_list}")
+
+    def test_callback_fires_on_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _callback_timer("cb-failure", "exit 1")
+            )
+
+            pane_list_json = json.dumps([{"pane_id": 42, "title": "test"}])
+            with patch("wakelite.service.subprocess.run") as mock_run:
+                mock_run.return_value = unittest.mock.Mock(
+                    returncode=0, stdout=pane_list_json, stderr=""
+                )
+                svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.0)
+
+                send_calls = [c for c in mock_run.call_args_list if "send-text" in str(c)]
+                self.assertTrue(len(send_calls) >= 1, f"Expected send-text calls for failed run")
+
+    def test_callback_skips_waiting(self):
+        """Exit 75 (waiting) should NOT trigger callback."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _callback_timer("cb-waiting", "exit 75")
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run:
+                svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.0)
+
+                # No wezterm calls should be made for exit 75
+                wezterm_calls = [c for c in mock_run.call_args_list if "wezterm" in str(c)]
+                self.assertEqual(len(wezterm_calls), 0, f"Exit 75 should not trigger callback, got: {wezterm_calls}")
+
+    def test_callback_skips_when_not_configured(self):
+        """Timer without callback field should make no subprocess calls."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _basic_timer("no-callback", "echo ok")
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run:
+                svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.0)
+
+                wezterm_calls = [c for c in mock_run.call_args_list if "wezterm" in str(c)]
+                self.assertEqual(len(wezterm_calls), 0)
+
+    def test_callback_fallback_when_pane_gone(self):
+        """When pane is gone, should fall back to Slack + spawn."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _callback_timer("cb-fallback", "echo fallback-test", pane_id=999)
+            )
+
+            def mock_run_side_effect(*args, **kwargs):
+                cmd = args[0] if args else kwargs.get("args", [])
+                result = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+                if "list" in cmd:
+                    # Return empty pane list — pane 999 not found
+                    result.stdout = json.dumps([{"pane_id": 1, "title": "other"}])
+                elif "spawn" in cmd:
+                    result.stdout = "55"  # new pane id
+                return result
+
+            with patch("wakelite.service.subprocess.run", side_effect=mock_run_side_effect) as mock_run, \
+                 patch.object(svc.notifier, "notify_slack") as mock_slack:
+                svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.5)
+
+                # Slack should have been called with fallback message
+                mock_slack.assert_called()
+                slack_msg = mock_slack.call_args[0][0]
+                self.assertIn("fallback", slack_msg.lower())
+
+                # spawn should have been called with claude --resume
+                spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+                self.assertTrue(len(spawn_calls) >= 1, f"Expected spawn call, got: {mock_run.call_args_list}")
 
 
 if __name__ == "__main__":

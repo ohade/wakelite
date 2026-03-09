@@ -55,6 +55,7 @@ All fields accepted by `POST /v1/timers` and `PATCH /v1/timers/{timer_id}`.
 | `resources` | list | no | `[]` | Resource capacity requirements |
 | `max_runs` | int/null | no | `null` | Auto-disable after N total runs |
 | `until` | object/null | no | `null` | Auto-delete on success/failure outcome |
+| `callback` | object/null | no | `null` | Reconnect results to originating terminal |
 
 ### `command`
 
@@ -175,6 +176,52 @@ Both fields are required when `until` is present:
 | `on_failure` | string | `"delete"`, `"continue"` | Action when run exits non-zero (excluding 75) |
 
 When `"delete"` is triggered, the timer is automatically removed.
+
+### `callback`
+
+Optional. Reconnects timer results to the originating terminal session.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | string | yes | — | Callback mechanism. v1: `"wezterm"` only |
+| `pane_id` | int | no | from `$WEZTERM_PANE` | WezTerm pane to inject results into. Auto-captured at creation if env var is set |
+| `session_id` | string | no | `null` | Claude Code session ID for `--resume` fallback when pane is gone |
+
+**Behavior:**
+- Callback fires on `success` and `failed` status only. Never on `waiting` (exit 75) or `aborted`.
+- `pane_id` is auto-captured from `$WEZTERM_PANE` when creating via CLI, MCP, or REST API (if the server process has the env var).
+- **Happy path:** If the pane exists, results are injected via `wezterm cli send-text` and auto-submitted (Enter pressed). Claude Code receives it as a new prompt.
+- **Fallback:** If the pane is gone, a Slack DM is sent. If `session_id` is set, a new WezTerm tab opens with `claude --resume <session_id>` and results are injected there.
+
+```json
+{
+  "callback": {
+    "type": "wezterm",
+    "pane_id": 11,
+    "session_id": "abc-def-123"
+  }
+}
+```
+
+**Injected message format:**
+
+```
+[WakeLite callback] Timer "check-build" completed
+Status: success | Exit code: 0 | Duration: 2m 15s
+Stdout (last 50 lines):
+─────────────────────────
+<truncated stdout from run log file>
+─────────────────────────
+This timer was created during your session. Act on the results above.
+```
+
+**Auto-capture summary:**
+
+| Creation path | Has `$WEZTERM_PANE`? | Auto-capture works? |
+|--------------|-------------------|-------------------|
+| CLI from Claude Code terminal | Yes | Yes |
+| MCP from Claude Code | Yes (inherited) | Yes |
+| REST API from external tool | No | No (pass explicitly) |
 
 ### `max_runs`
 

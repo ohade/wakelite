@@ -749,6 +749,192 @@ class WakeLiteService:
             return True
         return False
 
+    def _execute_callback(
+        self,
+        timer: Dict[str, Any],
+        status: str,
+        exit_code: Optional[int],
+        run_id: str,
+        stdout_path: str,
+        duration_seconds: float,
+    ) -> None:
+        """Fire callback if configured. Only on success/failed, never waiting/aborted."""
+        callback = timer.get("callback")
+        if not callback:
+            return
+        if status not in ("success", "failed"):
+            return
+
+        try:
+            timer_name = timer.get("name", timer["id"])
+            duration_str = self._format_duration(duration_seconds)
+
+            # Read last 50 lines of stdout
+            stdout_tail = ""
+            try:
+                p = Path(stdout_path)
+                if p.exists():
+                    lines = p.read_text(errors="replace").splitlines()
+                    tail = lines[-50:] if len(lines) > 50 else lines
+                    stdout_tail = "\n".join(tail)
+            except Exception:
+                stdout_tail = "(unable to read stdout)"
+
+            message = (
+                f'[WakeLite callback] Timer "{timer_name}" completed\n'
+                f"Status: {status} | Exit code: {exit_code} | Duration: {duration_str}\n"
+                f"Stdout (last 50 lines):\n"
+                f"{'─' * 25}\n"
+                f"{stdout_tail}\n"
+                f"{'─' * 25}\n"
+                f"This timer was created during your session. Act on the results above."
+            )
+
+            if callback.get("type") == "wezterm":
+                # Write signal file for UserPromptSubmit hook to pick up
+                session_id = callback.get("session_id")
+                if session_id:
+                    self._write_callback_signal(session_id, timer_name, status, exit_code, duration_str, stdout_tail)
+                self._wezterm_callback(callback, message, timer, timer_name, status)
+        except Exception:
+            logger.warning("Callback failed for timer %s", timer.get("id"), exc_info=True)
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h}h {m}m {s}s"
+        if m > 0:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+    def _write_callback_signal(
+        self,
+        session_id: str,
+        timer_name: str,
+        status: str,
+        exit_code: Optional[int],
+        duration_str: str,
+        stdout_tail: str,
+    ) -> None:
+        """Write callback data to signal file for Claude Code hook to pick up."""
+        import datetime as _dt
+
+        signal_dir = Path.home() / ".claude" / "session-signals"
+        signal_dir.mkdir(parents=True, exist_ok=True)
+        signal_file = signal_dir / f"{session_id}.wakelite-callback.json"
+
+        signal_data = {
+            "timer_name": timer_name,
+            "status": status,
+            "exit_code": exit_code,
+            "duration": duration_str,
+            "stdout_tail": stdout_tail,
+            "timestamp": _dt.datetime.now().isoformat(),
+        }
+        signal_file.write_text(json.dumps(signal_data, indent=2))
+        logger.info("Wrote callback signal file: %s", signal_file)
+
+    def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
+                          timer_name: str = "", status: str = "") -> None:
+        """Send short trigger to WezTerm pane, with Slack + resume fallback.
+
+        If a signal file was written (session_id present), sends only a short
+        trigger message. The UserPromptSubmit hook reads the full data from the
+        signal file. Falls back to full message if no session_id.
+        """
+        pane_id = callback.get("pane_id")
+        session_id = callback.get("session_id")
+
+        # Use short trigger if signal file was written, else full message
+        if session_id and timer_name:
+            trigger = f"[WakeLite: {timer_name} completed ({status})]"
+        else:
+            trigger = message
+
+        if pane_id is not None:
+            # Check if pane still exists
+            try:
+                result = subprocess.run(
+                    ["wezterm", "cli", "list", "--format", "json"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    panes = json.loads(result.stdout)
+                    pane_exists = any(p.get("pane_id") == pane_id for p in panes)
+                    if pane_exists:
+                        # Happy path: activate and send short trigger
+                        subprocess.run(
+                            ["wezterm", "cli", "activate-pane", "--pane-id", str(pane_id)],
+                            capture_output=True, timeout=5,
+                        )
+                        subprocess.run(
+                            ["wezterm", "cli", "send-text", "--pane-id", str(pane_id), trigger],
+                            capture_output=True, timeout=5,
+                        )
+                        time.sleep(2.0)  # Claude Code TUI needs time to settle after paste
+                        # --no-paste so the newline is a raw Enter keypress
+                        # Retry up to 3 times with increasing delay
+                        for attempt in range(3):
+                            enter_result = subprocess.run(
+                                ["wezterm", "cli", "send-text", "--no-paste", "--pane-id", str(pane_id), "\r"],
+                                capture_output=True, timeout=5,
+                            )
+                            if enter_result.returncode == 0:
+                                break
+                            time.sleep(1.0 * (attempt + 1))
+                        logger.info("Callback delivered to pane %d for timer %s (enter rc=%d)", pane_id, timer.get("id"), enter_result.returncode)
+                        return
+            except Exception:
+                logger.warning("WezTerm pane check failed for pane %d", pane_id, exc_info=True)
+
+        # Fallback: pane gone or no pane_id
+        self._wezterm_fallback(callback, message, timer)
+
+    def _wezterm_fallback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any]) -> None:
+        """Fallback: Slack DM + optionally spawn new WezTerm tab with claude --resume."""
+        timer_name = timer.get("name", timer.get("id", "unknown"))
+        self.notifier.notify_slack(
+            f":warning: *Callback fallback* — pane gone\n"
+            f"Timer: *{timer_name}*\n"
+            f"Results delivered to new tab (or Slack only if no session_id).\n\n"
+            f"```\n{message[:1500]}\n```"
+        )
+
+        session_id = callback.get("session_id")
+        if not session_id:
+            logger.info("No session_id for callback fallback, Slack only for timer %s", timer.get("id"))
+            return
+
+        try:
+            cwd = timer.get("command", {}).get("workingDirectory") or str(Path.home())
+            result = subprocess.run(
+                ["wezterm", "cli", "spawn", "--cwd", cwd, "--", "claude", "--resume", session_id],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                new_pane = result.stdout.strip()
+                logger.info("Spawned resume tab (pane %s) for session %s", new_pane, session_id)
+                time.sleep(3)  # Wait for Claude Code to initialize
+                subprocess.run(
+                    ["wezterm", "cli", "send-text", "--pane-id", new_pane, message],
+                    capture_output=True, timeout=5,
+                )
+                time.sleep(1.0)  # Claude Code TUI needs time to process pasted text
+                for attempt in range(3):
+                    enter_result = subprocess.run(
+                        ["wezterm", "cli", "send-text", "--no-paste", "--pane-id", new_pane, "\r"],
+                        capture_output=True, timeout=5,
+                    )
+                    if enter_result.returncode == 0:
+                        break
+                    time.sleep(0.5 * (attempt + 1))
+            else:
+                logger.warning("Failed to spawn resume tab: %s", result.stderr)
+        except Exception:
+            logger.warning("Resume spawn failed for session %s", session_id, exc_info=True)
+
     def _run_occurrence(
         self,
         timer: Dict[str, Any],
@@ -788,6 +974,7 @@ class WakeLiteService:
         notifications = timer.get("notifications", {})
         notify_on_success = bool(notifications.get("onSuccess", False))
         notify_on_failure = bool(notifications.get("onFailure", True))
+        run_start_mono = time.monotonic()
 
         try:
             with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
@@ -855,6 +1042,10 @@ class WakeLiteService:
             stderr_path=str(stderr_path),
         )
 
+        # Fire callback if configured (success/failed only)
+        duration_seconds = time.monotonic() - run_start_mono
+        self._execute_callback(timer, status, exit_code, run_id, str(stdout_path), duration_seconds)
+
         runtime = self.state.set_runtime_idle(timer_id, run_id=run_id)
 
         # Update daemon state if this is a daemon timer
@@ -886,7 +1077,7 @@ class WakeLiteService:
                     f"{timer_name} — {trigger}=delete triggered. Timer auto-deleted.",
                 )
                 self.notifier.notify_slack(
-                    f"Timer auto-deleted: *{timer_name}*\n"
+                    f":wastebasket: Timer auto-deleted: *{timer_name}*\n"
                     f"Condition: `{trigger}=delete` triggered\n"
                     f"Exit code: {exit_code}"
                 )
