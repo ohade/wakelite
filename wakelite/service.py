@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -576,30 +577,64 @@ class WakeLiteService:
 
         self._last_slow_tick_at = datetime.now() - timedelta(seconds=self.tick_seconds)
         prune_counter = 0
+        consecutive_errors = 0
 
         while not self._stop.is_set():
-            self._wake_event.clear()
-            now = datetime.now()
-            self.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
+            try:
+                self._wake_event.clear()
+                now = datetime.now()
+                self.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
 
-            # Fast tick: interval timers + daemon health (every wake)
-            self._process_interval_due(now)
-            self._process_daemons(now)
+                # Fast tick: interval timers + daemon health (every wake)
+                self._process_interval_due(now)
+                self._process_daemons(now)
 
-            # Slow tick: calendar timers + housekeeping (time-based)
-            if (now - self._last_slow_tick_at).total_seconds() >= self.tick_seconds:
-                self._process_due(last_tick, now)
-                self._export_wake_intents(now)
-                self._maybe_emit_morning_digest(now)
+                # Slow tick: calendar timers + housekeeping (time-based)
+                if (now - self._last_slow_tick_at).total_seconds() >= self.tick_seconds:
+                    self._process_due(last_tick, now)
+                    self._export_wake_intents(now)
+                    self._maybe_emit_morning_digest(now)
 
-                self.state.set_meta("runner.last_tick", now.isoformat())
-                last_tick = now
-                self._last_slow_tick_at = now
+                    self.state.set_meta("runner.last_tick", now.isoformat())
+                    last_tick = now
+                    self._last_slow_tick_at = now
 
-                prune_counter += 1
-                if prune_counter >= max(1, int(3600 / self.tick_seconds)):
-                    self._prune()
-                    prune_counter = 0
+                    prune_counter += 1
+                    if prune_counter >= max(1, int(3600 / self.tick_seconds)):
+                        self._prune()
+                        prune_counter = 0
+
+                if consecutive_errors > 0:
+                    logger.info("Scheduler recovered after %d consecutive errors", consecutive_errors)
+                consecutive_errors = 0
+
+            except sqlite3.OperationalError as e:
+                consecutive_errors += 1
+                backoff = min(30, 2 ** consecutive_errors)
+                self.state._reset_connection()
+                logger.error(
+                    "Scheduler tick failed (attempt %d, backoff %ds): %s — db_path=%s exists=%s",
+                    consecutive_errors, backoff, e,
+                    self.state.db_path,
+                    self.state.db_path.exists() if hasattr(self.state, 'db_path') else 'N/A',
+                )
+                if consecutive_errors >= 60:
+                    logger.critical(
+                        "Scheduler giving up after %d consecutive SQLite errors. "
+                        "Last error: %s. Runner will exit.",
+                        consecutive_errors, e,
+                    )
+                    os._exit(78)  # EX_CONFIG — launchd will restart us
+                self._wake_event.wait(timeout=backoff)
+                continue
+            except Exception as e:
+                consecutive_errors += 1
+                logger.exception("Unexpected scheduler error (attempt %d): %s", consecutive_errors, e)
+                if consecutive_errors >= 10:
+                    logger.critical("Scheduler giving up after %d unexpected errors", consecutive_errors)
+                    os._exit(78)
+                self._wake_event.wait(timeout=5)
+                continue
 
             # Sleep until next event or wake signal
             sleep_seconds = self._compute_next_wake(now)

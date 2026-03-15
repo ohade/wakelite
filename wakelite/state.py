@@ -40,17 +40,32 @@ class StateStore:
         self.db_path = db_path
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        """Return the persistent connection, creating it if needed."""
+        if self._conn is not None:
+            return self._conn
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = conn
         return conn
 
+    def _reset_connection(self) -> None:
+        """Close and discard the cached connection (e.g. after an error)."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        conn = self._connect()
+        with conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS meta (
@@ -163,19 +178,22 @@ class StateStore:
         return datetime.now(timezone.utc).isoformat()
 
     def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else default
 
     def set_meta(self, key: str, value: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
 
     def get_runtime(self, timer_id: str) -> RuntimeState:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT * FROM timer_runtime WHERE timer_id = ?", (timer_id,)
             ).fetchone()
@@ -196,7 +214,8 @@ class StateStore:
             )
 
     def set_runtime_running(self, timer_id: str, run_id: str, scheduled_at: str, pid: Optional[int] = None) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 """
                 INSERT INTO timer_runtime(timer_id, is_running, running_run_id, running_count, last_processed_scheduled_at)
@@ -215,7 +234,8 @@ class StateStore:
             )
 
     def set_runtime_idle(self, timer_id: str, run_id: Optional[str] = None) -> RuntimeState:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             if run_id:
                 conn.execute("DELETE FROM active_runs WHERE run_id = ?", (run_id,))
                 remaining = conn.execute(
@@ -255,21 +275,25 @@ class StateStore:
             )
 
     def update_active_run_pid(self, run_id: str, pid: int) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute("UPDATE active_runs SET pid = ? WHERE run_id = ?", (pid, run_id))
 
     def get_active_run_pid(self, run_id: str) -> Optional[int]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute("SELECT pid FROM active_runs WHERE run_id = ?", (run_id,)).fetchone()
             return int(row["pid"]) if row and row["pid"] is not None else None
 
     def get_active_runs_for_timer(self, timer_id: str) -> list:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute("SELECT * FROM active_runs WHERE timer_id = ?", (timer_id,)).fetchall()
             return [dict(r) for r in rows]
 
     def count_active_runs(self, timer_id: Optional[str] = None) -> int:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             if timer_id:
                 row = conn.execute("SELECT COUNT(*) as cnt FROM active_runs WHERE timer_id = ?", (timer_id,)).fetchone()
             else:
@@ -277,7 +301,8 @@ class StateStore:
             return int(row["cnt"])
 
     def get_daemon_state(self, timer_id: str) -> DaemonState:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute("SELECT * FROM daemon_state WHERE timer_id = ?", (timer_id,)).fetchone()
             if not row:
                 return DaemonState(timer_id=timer_id, status="stopped")
@@ -293,7 +318,8 @@ class StateStore:
             )
 
     def set_daemon_state(self, timer_id: str, **kwargs: Any) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             existing = conn.execute("SELECT 1 FROM daemon_state WHERE timer_id = ?", (timer_id,)).fetchone()
             if not existing:
                 conn.execute(
@@ -306,12 +332,14 @@ class StateStore:
                 conn.execute(f"UPDATE daemon_state SET {sets} WHERE timer_id = ?", vals)
 
     def list_runtime(self) -> List[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute("SELECT * FROM timer_runtime").fetchall()
             return [dict(r) for r in rows]
 
     def set_queue_once(self, timer_id: str, scheduled_at: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT queued_once, queued_scheduled_at FROM timer_runtime WHERE timer_id = ?",
                 (timer_id,),
@@ -334,7 +362,8 @@ class StateStore:
             return True
 
     def pop_queue_once(self, timer_id: str) -> Optional[str]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT queued_once, queued_scheduled_at FROM timer_runtime WHERE timer_id = ?",
                 (timer_id,),
@@ -350,7 +379,8 @@ class StateStore:
 
     def reserve_occurrence(self, timer_id: str, scheduled_at: str, is_catchup: bool) -> bool:
         now = self._now()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             try:
                 conn.execute(
                     """
@@ -364,7 +394,8 @@ class StateStore:
                 return False
 
     def mark_occurrence_status(self, timer_id: str, scheduled_at: str, status: str, last_error: Optional[str] = None) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 """
                 UPDATE occurrences
@@ -388,7 +419,8 @@ class StateStore:
         now = self._now()
         occurrence_key = f"{timer_id}:{scheduled_at}"
 
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT attempts FROM occurrences WHERE timer_id = ? AND scheduled_at = ?",
                 (timer_id, scheduled_at),
@@ -444,7 +476,8 @@ class StateStore:
         stderr_path: Optional[str],
     ) -> None:
         now = self._now()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 """
                 UPDATE run_history
@@ -469,7 +502,8 @@ class StateStore:
             )
 
     def count_completed_runs(self, timer_id: str) -> int:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM run_history WHERE timer_id = ? AND status IN ('success', 'failed')",
                 (timer_id,),
@@ -479,7 +513,8 @@ class StateStore:
     def recover_uncertain_runs(self) -> List[Dict[str, Any]]:
         now = self._now()
         recovered: List[Dict[str, Any]] = []
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute(
                 """
                 SELECT run_id, timer_id, scheduled_at
@@ -517,24 +552,28 @@ class StateStore:
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute("SELECT * FROM run_history WHERE run_id = ?", (run_id,)).fetchone()
             return dict(row) if row else None
 
     def store_idempotent(self, scope: str, idem_key: str, fingerprint: str, response: Dict[str, Any]) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 "INSERT INTO idempotency(scope, idem_key, fingerprint, response_json, created_at) VALUES(?, ?, ?, ?, ?)",
                 (scope, idem_key, fingerprint, json.dumps(response, sort_keys=True), self._now()),
             )
 
     def get_idempotent(self, scope: str, idem_key: str) -> Optional[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute(
                 "SELECT fingerprint, response_json FROM idempotency WHERE scope = ? AND idem_key = ?",
                 (scope, idem_key),
@@ -548,7 +587,8 @@ class StateStore:
             }
 
     def add_incident(self, severity: str, incident_type: str, message: str, timer_id: Optional[str] = None) -> int:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             cursor = conn.execute(
                 "INSERT INTO incidents(created_at, severity, type, timer_id, message) VALUES(?, ?, ?, ?, ?)",
                 (self._now(), severity, incident_type, timer_id, message),
@@ -562,12 +602,14 @@ class StateStore:
             query += " WHERE acknowledged = 0"
         query += " ORDER BY id DESC LIMIT ?"
 
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute(query, (limit,)).fetchall()
             return [dict(r) for r in rows]
 
     def ack_incident(self, incident_id: int) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             cursor = conn.execute(
                 "UPDATE incidents SET acknowledged = 1, acked_at = ? WHERE id = ?",
                 (self._now(), incident_id),
@@ -577,7 +619,8 @@ class StateStore:
     def prune_old_data(self, retention_days: int = DEFAULT_RETENTION_DAYS) -> Dict[str, int]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cutoff_iso = cutoff.isoformat()
-        with self._lock, self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             run_deleted = conn.execute(
                 "DELETE FROM run_history WHERE created_at < ?",
                 (cutoff_iso,),
