@@ -2,4 +2,15 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+
+# When running as a system daemon (root), WAKELITE_HOME must point to the
+# owning user's data directory — not /var/root/.wakelite.
+# Resolve from the owner of this script file (the real user who installed it).
+if [ -z "${WAKELITE_HOME:-}" ]; then
+  OWNER_HOME="$(stat -f '%Su' "$0" | xargs -I{} dscl . -read /Users/{} NFSHomeDirectory | awk '{print $2}')"
+  if [ -n "$OWNER_HOME" ] && [ -d "${OWNER_HOME}/.wakelite" ]; then
+    export WAKELITE_HOME="${OWNER_HOME}/.wakelite"
+  fi
+fi
+
 exec python3 -m wakelite.reconciler "$@"
