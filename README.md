@@ -72,6 +72,33 @@ Namespace: `wakelite.v1.*` — see [`docs/API.md`](docs/API.md) for the full too
 - **Crash recovery**: missed-run catch-up, uncertain-run marking, at-least-once delivery
 - **Zero dependencies**: Python stdlib only (optional: `rumps` for menu bar app)
 
+## Installation
+
+### Runner (user agent)
+
+The runner handles scheduling, command execution, and the web dashboard. Install it as a launchd user agent:
+
+```bash
+PYTHONPATH=. ./bin/wakelitectl launchd install --load
+```
+
+### Wake Reconciler (system daemon)
+
+For **wake-from-sleep** support, the reconciler syncs timer wake intents to `pmset schedule`. It runs as root so it can program hardware wakes.
+
+```bash
+# Install and start the system daemon (requires sudo)
+PYTHONPATH=. ./bin/wakelitectl launchd install-system --load
+```
+
+The reconciler resolves the owning user's `WAKELITE_HOME` from the script file's owner — no hardcoded paths. It reads `~/.wakelite/wake-intents.json` (written by the runner) and reconciles with `pmset schedule` entries every 10 minutes.
+
+**Verify it's working:**
+
+```bash
+pmset -g sched  # Should show wake entries by 'com.wakelite'
+```
+
 ## Docs
 
 - **[`docs/API.md`](docs/API.md)** — Full timer schema, field reference, recurrence types, execution controls, REST/MCP API reference
