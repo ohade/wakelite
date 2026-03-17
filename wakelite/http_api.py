@@ -86,6 +86,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
 
             if method == "GET" and path == "/ui":
+                ui_path = Path(__file__).parent.parent / "docs" / "ui2-live.html"
+                if ui_path.exists():
+                    self._send_html(ui_path.read_text(encoding="utf-8"))
+                    return
+                # Fallback: inline legacy UI
                 self._send_html(
                     """
                     <html>
@@ -1319,13 +1324,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if method == "GET" and path == "/ui2":
-                ui2_path = Path(__file__).parent.parent / "docs" / "ui2-live.html"
-                if ui2_path.exists():
-                    self._send_html(ui2_path.read_text(encoding="utf-8"))
-                else:
-                    self._send_html("<html><body><h1>ui2-live.html not found</h1></body></html>")
-                return
 
             if method == "GET" and path == "/v1/health":
                 self._send_json(200, self.service.health())
