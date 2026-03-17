@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WakeLite — Light Mode Dashboard</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      /* Warm palette */
+      --bg-root: #FAFAF9;
+      --bg-surface: #FFFFFF;
+      --text-primary: #1C1917;
+      --text-secondary: #78716C;
+      --text-tertiary: #A8A29E;
+      --border: #E7E5E4;
+      --border-light: #F5F5F4;
+
+      /* Accent */
+      --accent: #4F46E5;
+      --accent-light: #EEF2FF;
+      --accent-ring: rgba(79, 70, 229, 0.3);
+
+      /* Signals */
+      --success: #16A34A;
+      --success-bg: #F0FDF4;
+      --error: #DC2626;
+      --error-bg: #FEF2F2;
+      --error-bg-soft: #FFF5F5;
+      --warning: #D97706;
+
+      /* Type colors */
+      --daemon: #0891B2;
+      --interval: #D97706;
+      --scheduled: #4F46E5;
+
+      /* Effects */
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.04);
+      --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+
+      /* Typography */
+      --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+
+      /* Radii */
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+    }
+
+    html {
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-root);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* ─── Layout ─── */
+    .app {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 32px 64px;
+    }
+
+    /* ─── Header ─── */
+    header {
+      display: flex;
+      align-items: center;
+      padding: 24px 0 28px;
+      gap: 14px;
+    }
+
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo-icon svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+    }
+
+    .logo-wordmark {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
+    }
+
+    .header-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-left: 8px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      flex-shrink: 0;
+    }
+
+    .header-spacer { flex: 1; }
+
+    .header-bell {
+      position: relative;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: all 0.15s ease;
+    }
+    .header-bell:hover {
+      background: var(--border-light);
+      color: var(--text-primary);
+    }
+    .header-bell:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .header-bell svg {
+      width: 16px;
+      height: 16px;
+    }
+    .bell-badge {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      background: var(--error);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+
+    .btn-new-timer {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 16px;
+      background: var(--text-primary);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-new-timer:hover {
+      background: #292524;
+    }
+    .btn-new-timer:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .btn-new-timer svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    /* ─── Incidents Callout ─── */
+    .incidents-banner {
+      background: #FEF2F2;
+      border: 1px solid #FECACA;
+      border-radius: var(--radius-md);
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+    .incidents-banner .banner-icon {
+      width: 18px;
+      height: 18px;
+      color: var(--error);
+      flex-shrink: 0;
+    }
+    .incidents-banner .banner-text {
+      flex: 1;
+      font-size: 13px;
+      color: #991B1B;
+      font-weight: 500;
+    }
+    .incidents-banner .banner-text strong {
+      font-weight: 600;
+    }
+    .incidents-banner .banner-link {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--error);
+      text-decoration: none;
+      white-space: nowrap;
+      transition: opacity 0.15s ease;
+    }
+    .incidents-banner .banner-link:hover {
+      opacity: 0.75;
+    }
+
+    /* ─── Metrics Row ─── */
+    .metrics {
+      display: flex;
+      background: var(--bg-surface);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-sm);
+      margin-bottom: 36px;
+      overflow: hidden;
+    }
+
+    .metric-card {
+      flex: 1;
+      padding: 22px 24px;
+      position: relative;
+    }
+    .metric-card:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      right: 0;
+      top: 16px;
+      bottom: 16px;
+      width: 1px;
+      background: var(--border);
+    }
+    .metric-card.danger {
+      background: var(--error-bg-soft);
+    }
+
+    .metric-label {
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-tertiary);
+      margin-bottom: 4px;
+    }
+    .metric-value {
+      font-family: var(--font-display);
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      color: var(--text-primary);
+      line-height: 1.1;
+    }
+    .metric-value .denom {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+    }
+    .metric-sub {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+    }
+
+    /* ─── Section Headers ─── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+    }
+    .section-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 6px;
+      background: var(--border-light);
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      margin-left: 8px;
+    }
+
+    /* ─── Timers Table ─── */
+    .timers-card {
+      background: var(--bg-surface);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+      margin-bottom: 40px;
+    }
+
+    .timers-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .timers-table thead th {
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-tertiary);
+      border-bottom: 1px solid var(--border);
+    }
+    .timers-table thead th:first-child { padding-left: 24px; }
+    .timers-table thead th:last-child { padding-right: 24px; text-align: right; }
+
+    .timers-table tbody tr {
+      transition: background-color 0.15s ease;
+    }
+    .timers-table tbody tr:hover {
+      background: #FAFAF9;
+    }
+    .timers-table tbody tr:not(:last-child) td {
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .timers-table td {
+      padding: 14px 16px;
+      vertical-align: middle;
+      font-size: 13px;
+    }
+    .timers-table td:first-child { padding-left: 24px; }
+    .timers-table td:last-child { padding-right: 24px; text-align: right; }
+
+    /* Timer name cell */
+    .timer-name-cell {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .type-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .type-dot.daemon { background: var(--daemon); }
+    .type-dot.interval { background: var(--interval); }
+    .type-dot.scheduled { background: var(--accent); }
+
+    .type-label {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      font-weight: 500;
+    }
+
+    .timer-info {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .timer-name {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .timer-comment {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .schedule-text {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    /* Toggle indicator */
+    .toggle-track {
+      display: inline-flex;
+      align-items: center;
+      width: 32px;
+      height: 18px;
+      border-radius: 9px;
+      padding: 2px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .toggle-track.on {
+      background: var(--success);
+    }
+    .toggle-track.off {
+      background: var(--border);
+    }
+    .toggle-knob {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+      transition: transform 0.15s ease;
+    }
+    .toggle-track.on .toggle-knob {
+      transform: translateX(14px);
+    }
+
+    .next-run {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .next-run.running {
+      color: var(--daemon);
+      font-weight: 500;
+    }
+    .next-run.soon {
+      color: var(--warning);
+      font-weight: 500;
+    }
+    .next-run.paused {
+      color: var(--text-tertiary);
+    }
+
+    /* Disabled rows */
+    .timers-table tbody tr.disabled-row {
+      opacity: 0.5;
+    }
+    .timers-table tbody tr.disabled-row:hover {
+      opacity: 0.7;
+    }
+
+    /* Row actions */
+    .row-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    .timers-table tbody tr:hover .row-actions {
+      opacity: 1;
+    }
+    .row-action-btn {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      color: var(--text-tertiary);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .row-action-btn:hover {
+      background: var(--border-light);
+      border-color: var(--border);
+      color: var(--text-secondary);
+    }
+    .row-action-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .row-action-btn svg {
+      width: 14px;
+      height: 14px;
+    }
+    .row-action-btn.danger:hover {
+      background: var(--error-bg);
+      border-color: #FECACA;
+      color: var(--error);
+    }
+
+    /* ─── Activity Timeline ─── */
+    .activity-section {
+      margin-bottom: 40px;
+    }
+
+    .timeline {
+      position: relative;
+      padding-left: 28px;
+    }
+
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 7px;
+      top: 8px;
+      bottom: 8px;
+      width: 1px;
+      background: var(--border);
+    }
+
+    .timeline-group-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-tertiary);
+      margin-bottom: 12px;
+      margin-top: 20px;
+      position: relative;
+    }
+    .timeline-group-label:first-child {
+      margin-top: 0;
+    }
+
+    .timeline-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 6px 0;
+      position: relative;
+    }
+
+    .timeline-dot {
+      position: absolute;
+      left: -24px;
+      top: 10px;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      border: 2px solid var(--bg-root);
+      z-index: 1;
+    }
+    .timeline-dot.success {
+      background: var(--success);
+    }
+    .timeline-dot.failed {
+      background: var(--error);
+    }
+
+    .timeline-content {
+      flex: 1;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      min-height: 20px;
+    }
+
+    .timeline-timer {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .timeline-message {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .timeline-time {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-left: auto;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* ─── Footer ─── */
+    .footer {
+      margin-top: 48px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .footer-left {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer-left .version {
+      font-family: var(--font-display);
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--border-light);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .footer-right {
+      display: flex;
+      gap: 12px;
+    }
+    .footer-link {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      text-decoration: none;
+      transition: color 0.15s ease;
+    }
+    .footer-link:hover {
+      color: var(--accent);
+    }
+
+    /* ─── Micro-interactions ─── */
+    @media (prefers-reduced-motion: no-preference) {
+      .fade-in {
+        animation: fadeIn 0.35s ease both;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .fade-in.d1 { animation-delay: 0.05s; }
+      .fade-in.d2 { animation-delay: 0.1s; }
+      .fade-in.d3 { animation-delay: 0.15s; }
+      .fade-in.d4 { animation-delay: 0.2s; }
+      .fade-in.d5 { animation-delay: 0.25s; }
+    }
+
+    /* Focus ring global */
+    :focus-visible {
+      outline: 2px solid var(--accent-ring);
+      outline-offset: 2px;
+    }
+
+    /* Selection color */
+    ::selection {
+      background: var(--accent-light);
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ─── Header ─── -->
+  <header class="fade-in">
+    <div class="logo-group">
+      <div class="logo-icon">
+        <!-- Simplified lighthouse icon, single warm gray -->
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 3L9 8V17H15V8L12 3Z" fill="#A8A29E"/>
+          <rect x="8" y="17" width="8" height="2" rx="0.5" fill="#A8A29E"/>
+          <circle cx="12" cy="20.5" r="1" fill="#A8A29E"/>
+          <line x1="12" y1="1" x2="12" y2="2.5" stroke="#A8A29E" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="7" y1="4" x2="8" y2="5.2" stroke="#A8A29E" stroke-width="1" stroke-linecap="round" opacity="0.6"/>
+          <line x1="17" y1="4" x2="16" y2="5.2" stroke="#A8A29E" stroke-width="1" stroke-linecap="round" opacity="0.6"/>
+          <rect x="10.5" y="9" width="3" height="2" rx="0.5" fill="#FAFAF9" opacity="0.8"/>
+          <rect x="10.5" y="12.5" width="3" height="2" rx="0.5" fill="#FAFAF9" opacity="0.8"/>
+        </svg>
+      </div>
+      <span class="logo-wordmark">WakeLite</span>
+    </div>
+
+    <div class="header-status">
+      <span class="status-dot"></span>
+      All systems healthy
+    </div>
+
+    <span class="header-spacer"></span>
+
+    <button class="header-bell" title="Notifications">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+      <span class="bell-badge">10</span>
+    </button>
+
+    <button class="btn-new-timer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Timer
+    </button>
+  </header>
+
+  <!-- ─── Incidents Callout ─── -->
+  <div class="incidents-banner fade-in d1">
+    <svg class="banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="8" x2="12" y2="12"/>
+      <line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <span class="banner-text"><strong>10 incidents</strong> need review</span>
+    <a href="#" class="banner-link">Review all &rarr;</a>
+  </div>
+
+  <!-- ─── Metrics Row ─── -->
+  <div class="metrics fade-in d2">
+    <div class="metric-card">
+      <div class="metric-label">Timers Active</div>
+      <div class="metric-value">8<span class="denom">/9</span></div>
+      <div class="metric-sub">1 disabled</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Active Runs</div>
+      <div class="metric-value">1</div>
+      <div class="metric-sub">slack-agent (daemon)</div>
+    </div>
+    <div class="metric-card danger">
+      <div class="metric-label">Incidents</div>
+      <div class="metric-value">10</div>
+      <div class="metric-sub">Oldest: 4d ago</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Runner Uptime</div>
+      <div class="metric-value">33<span class="denom">h</span></div>
+      <div class="metric-sub">Since Mar 15, 07:00</div>
+    </div>
+  </div>
+
+  <!-- ─── Timers ─── -->
+  <div class="section-header fade-in d3">
+    <div style="display:flex;align-items:center;">
+      <span class="section-title">Timers</span>
+      <span class="section-count">9</span>
+    </div>
+  </div>
+
+  <div class="timers-card fade-in d3">
+    <table class="timers-table">
+      <thead>
+        <tr>
+          <th style="width:35%">Timer</th>
+          <th>Type</th>
+          <th>Schedule</th>
+          <th>Status</th>
+          <th>Next Run</th>
+          <th style="width:80px"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- slack-agent -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">slack-agent</div>
+                <div class="timer-comment">Slack socket-mode bot</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot daemon"></span>
+              <span class="type-label">Daemon</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">continuous</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run running">running</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="View logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg></button>
+              <button class="row-action-btn danger" title="Stop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- session-start-hello -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">session-start-hello</div>
+                <div class="timer-comment">Greeting on session open</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot interval"></span>
+              <span class="type-label">Interval</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">every 302m</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run soon">in 6h</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- evening-tasks-reminder -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">evening-tasks-reminder</div>
+                <div class="timer-comment">Review daily tasks</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">once Mar 16 20:00</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run soon">in 4h</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- daily-merge-stable -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">daily-merge-stable</div>
+                <div class="timer-comment">Merge stable/trunk daily</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 06:00</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run">in 14h</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- plane-db-backup -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">plane-db-backup</div>
+                <div class="timer-comment">Backup Plane SQLite DB</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 02:00</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run">tomorrow 02:00</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- organize-downloads -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">organize-downloads</div>
+                <div class="timer-comment">Sort ~/Downloads by type</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 07:00</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run">in 15h</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- kb-audit -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">kb-audit</div>
+                <div class="timer-comment">Knowledge base health check</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 09:00</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run">in 17h</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- claudeception-weekly -->
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">claudeception-weekly</div>
+                <div class="timer-comment">Weekly knowledge extraction</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot scheduled"></span>
+              <span class="type-label">Scheduled</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">Sun at 01:55</span></td>
+          <td>
+            <div class="toggle-track on"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run">in 7d</span></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <!-- pr-99255-build-monitor (disabled) -->
+        <tr class="disabled-row">
+          <td>
+            <div class="timer-name-cell">
+              <div class="timer-info">
+                <div class="timer-name">pr-99255-build-monitor</div>
+                <div class="timer-comment">Poll PR build status</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="type-dot interval"></span>
+              <span class="type-label">Interval</span>
+            </div>
+          </td>
+          <td><span class="schedule-text">every 5m</span></td>
+          <td>
+            <div class="toggle-track off"><div class="toggle-knob"></div></div>
+          </td>
+          <td><span class="next-run paused">paused</span></td>
+          <td>
+            <div class="row-actions" style="opacity:1;">
+              <button class="row-action-btn" title="Enable" style="color:var(--success);"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg></button>
+              <button class="row-action-btn danger" title="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ─── Activity Timeline ─── -->
+  <div class="activity-section">
+    <div class="section-header fade-in d4">
+      <div style="display:flex;align-items:center;">
+        <span class="section-title">Activity</span>
+        <span class="section-count">10</span>
+      </div>
+    </div>
+
+    <div class="timeline fade-in d5">
+      <div class="timeline-group-label">Today</div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">session-start-hello</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">1h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">session-start-hello</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">4h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">organize-downloads</span>
+          <span class="timeline-message">Completed successfully (3 runs)</span>
+          <span class="timeline-time">7h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">kb-audit</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">7h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot failed"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">organize-downloads</span>
+          <span class="timeline-message">exit code 1</span>
+          <span class="timeline-time">9h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">session-start-hello</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">9h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">daily-merge-stable</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">10h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">plane-db-backup</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">14h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">claudeception-weekly</span>
+          <span class="timeline-message">Completed successfully</span>
+          <span class="timeline-time">14h ago</span>
+        </div>
+      </div>
+
+      <div class="timeline-group-label">Yesterday</div>
+
+      <div class="timeline-item">
+        <span class="timeline-dot success"></span>
+        <div class="timeline-content">
+          <span class="timeline-timer">pr-99255-build-monitor</span>
+          <span class="timeline-message">Completed successfully (3 runs)</span>
+          <span class="timeline-time">18h ago</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Footer ─── -->
+  <div class="footer fade-in d5">
+    <div class="footer-left">
+      <span class="version">v2.0.0</span>
+      <span>Last heartbeat: 3s ago</span>
+    </div>
+    <div class="footer-right">
+      <a href="#" class="footer-link">API Docs</a>
+      <a href="#" class="footer-link">MCP</a>
+      <a href="#" class="footer-link">CLI</a>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

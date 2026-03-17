@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WakeLite — Dashboard Redesign</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      /* Navy depths */
+      --bg-root: #06081A;
+      --bg-surface: #0C1029;
+      --bg-elevated: #111638;
+      --bg-hover: #161C48;
+      --bg-active: #1B2255;
+
+      /* Borders */
+      --border-subtle: rgba(99, 102, 241, 0.08);
+      --border-default: rgba(99, 102, 241, 0.15);
+      --border-strong: rgba(99, 102, 241, 0.25);
+
+      /* Text */
+      --text-primary: #E8ECFC;
+      --text-secondary: #8B92C4;
+      --text-tertiary: #5A6199;
+      --text-inverse: #06081A;
+
+      /* Accent — Indigo */
+      --indigo-50: #EEF2FF;
+      --indigo-400: #818CF8;
+      --indigo-500: #6366F1;
+      --indigo-600: #4F46E5;
+      --indigo-glow: rgba(99, 102, 241, 0.15);
+
+      /* Signal colors */
+      --green-400: #4ADE80;
+      --green-500: #22C55E;
+      --green-bg: rgba(34, 197, 94, 0.1);
+      --green-border: rgba(34, 197, 94, 0.2);
+
+      --amber-400: #FBBF24;
+      --amber-500: #F59E0B;
+      --amber-bg: rgba(251, 191, 36, 0.1);
+      --amber-border: rgba(251, 191, 36, 0.2);
+
+      --red-400: #F87171;
+      --red-500: #EF4444;
+      --red-bg: rgba(239, 68, 68, 0.1);
+      --red-border: rgba(239, 68, 68, 0.2);
+
+      --cyan-400: #22D3EE;
+      --cyan-500: #06B6D4;
+      --cyan-bg: rgba(6, 182, 212, 0.1);
+      --cyan-border: rgba(6, 182, 212, 0.2);
+
+      --blue-400: #60A5FA;
+      --blue-bg: rgba(96, 165, 250, 0.1);
+
+      /* Typography */
+      --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+      /* Radii */
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --radius-xl: 16px;
+
+      /* Transitions */
+      --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    html {
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg-root);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── Ambient Background ─── */
+    body::before {
+      content: '';
+      position: fixed;
+      top: -200px;
+      right: -100px;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.06) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    body::after {
+      content: '';
+      position: fixed;
+      bottom: -300px;
+      left: -200px;
+      width: 800px;
+      height: 800px;
+      background: radial-gradient(circle, rgba(251, 191, 36, 0.03) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ─── Layout ─── */
+    .app {
+      position: relative;
+      z-index: 1;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px 48px;
+    }
+
+    /* ─── Incidents Banner ─── */
+    .incidents-banner {
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.12) 0%, rgba(251, 191, 36, 0.08) 100%);
+      border: 1px solid var(--red-border);
+      border-radius: var(--radius-md);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+      animation: bannerSlide 0.4s var(--ease-out);
+    }
+    @keyframes bannerSlide {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .incidents-banner .alert-icon {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+    }
+    .incidents-banner .alert-text {
+      flex: 1;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--red-400);
+    }
+    .incidents-banner .alert-text strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+    .incidents-banner .alert-btn {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--red-border);
+      color: var(--red-400);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 14px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: var(--font-sans);
+    }
+    .incidents-banner .alert-btn:hover {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: rgba(239, 68, 68, 0.4);
+    }
+
+    /* ─── Header ─── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 20px 0;
+      margin-bottom: 4px;
+    }
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .logo-icon svg {
+      width: 100%;
+      height: 100%;
+    }
+    .logo-wordmark {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+    }
+    .header-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px 4px 8px;
+      border-radius: 999px;
+      background: var(--green-bg);
+      border: 1px solid var(--green-border);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--green-400);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--green-500);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.3); }
+      50% { opacity: 1; box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+    }
+    .header-sep {
+      width: 1px;
+      height: 20px;
+      background: var(--border-default);
+      margin: 0 4px;
+    }
+    .header-muted {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+    }
+    .header-muted svg {
+      width: 12px;
+      height: 12px;
+      opacity: 0.5;
+    }
+    .header-spacer { flex: 1; }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      background: var(--indigo-500);
+      color: white;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+    .btn-primary:hover {
+      background: var(--indigo-600);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3), inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+    .btn-primary svg { width: 14px; height: 14px; }
+
+    /* ─── Metrics Row ─── */
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .metric-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 16px 18px;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-card::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent 0%, var(--border-strong) 50%, transparent 100%);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .metric-card:hover {
+      border-color: var(--border-default);
+      background: var(--bg-elevated);
+    }
+    .metric-card:hover::after { opacity: 1; }
+    .metric-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    .metric-value {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+    }
+    .metric-value .denom {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+    }
+    .metric-card.danger .metric-value { color: var(--red-400); }
+    .metric-card.danger { border-color: var(--red-border); }
+    .metric-card.danger::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at top right, rgba(239, 68, 68, 0.06) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    .metric-sub {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 6px;
+    }
+
+    /* ─── Section Header ─── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .section-count {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      background: var(--bg-elevated);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 500;
+      margin-left: 8px;
+    }
+    .section-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .btn-ghost {
+      background: none;
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      font-family: var(--font-sans);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-ghost:hover {
+      border-color: var(--border-default);
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* ─── Timers Table ─── */
+    .timers-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+    .timers-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .timers-table thead th {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      text-align: left;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+    }
+    .timers-table thead th:first-child { padding-left: 20px; }
+    .timers-table thead th:last-child { padding-right: 20px; text-align: right; }
+    .timers-table tbody tr {
+      cursor: pointer;
+      transition: background 0.12s ease;
+    }
+    .timers-table tbody tr:hover {
+      background: var(--bg-hover);
+    }
+    .timers-table tbody tr:not(:last-child) td {
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .timers-table td {
+      padding: 12px 16px;
+      vertical-align: middle;
+      font-size: 13px;
+    }
+    .timers-table td:first-child { padding-left: 20px; }
+    .timers-table td:last-child { padding-right: 20px; text-align: right; }
+
+    /* Timer name cell */
+    .timer-name-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .timer-name {
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 13px;
+    }
+    .timer-comment {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+      max-width: 220px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Type badges */
+    .type-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+    .type-badge svg { width: 10px; height: 10px; }
+    .type-scheduled {
+      background: var(--indigo-glow);
+      color: var(--indigo-400);
+      border: 1px solid rgba(99, 102, 241, 0.2);
+    }
+    .type-interval {
+      background: var(--amber-bg);
+      color: var(--amber-400);
+      border: 1px solid var(--amber-border);
+    }
+    .type-daemon {
+      background: var(--cyan-bg);
+      color: var(--cyan-400);
+      border: 1px solid var(--cyan-border);
+    }
+
+    /* Schedule text */
+    .schedule-text {
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    /* Status chip */
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .status-on {
+      background: var(--green-bg);
+      color: var(--green-400);
+      border: 1px solid var(--green-border);
+    }
+    .status-off {
+      background: rgba(100, 116, 139, 0.1);
+      color: #94A3B8;
+      border: 1px solid rgba(100, 116, 139, 0.15);
+    }
+
+    /* Next run */
+    .next-run {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .next-run.soon { color: var(--amber-400); }
+    .next-run.running {
+      color: var(--green-400);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .next-run.running::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--green-500);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    /* Resources tags */
+    .resource-tags {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .resource-tag {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--bg-active);
+      color: var(--text-tertiary);
+      font-family: var(--font-mono);
+      border: 1px solid var(--border-subtle);
+    }
+
+    /* Row actions */
+    .row-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    .timers-table tbody tr:hover .row-actions { opacity: 1; }
+    .row-action-btn {
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      background: var(--bg-active);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+    .row-action-btn:hover {
+      background: var(--indigo-500);
+      color: white;
+    }
+    .row-action-btn.danger:hover {
+      background: var(--red-500);
+    }
+    .row-action-btn svg { width: 13px; height: 13px; }
+
+    /* ─── Activity Feed ─── */
+    .activity-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+    }
+    .activity-date-group {
+      padding: 0;
+    }
+    .activity-date-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 12px 20px 8px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .activity-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      transition: background 0.12s ease;
+      cursor: pointer;
+    }
+    .activity-item:not(:last-child) {
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .activity-item:hover {
+      background: var(--bg-hover);
+    }
+    .activity-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .activity-icon svg { width: 12px; height: 12px; }
+    .activity-icon.success { background: var(--green-bg); color: var(--green-400); border: 1px solid var(--green-border); }
+    .activity-icon.failed { background: var(--red-bg); color: var(--red-400); border: 1px solid var(--red-border); }
+    .activity-icon.waiting { background: var(--blue-bg); color: var(--blue-400); border: 1px solid rgba(96,165,250,0.2); }
+    .activity-icon.running { background: var(--amber-bg); color: var(--amber-400); border: 1px solid var(--amber-border); }
+
+    .activity-detail { flex: 1; min-width: 0; }
+    .activity-timer-name {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+    .activity-message {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 1px;
+    }
+    .activity-time {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+    }
+    .activity-view-btn {
+      font-size: 11px;
+      color: var(--indigo-400);
+      background: none;
+      border: 1px solid transparent;
+      padding: 3px 8px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: var(--font-sans);
+      font-weight: 500;
+      opacity: 0;
+      transition: all 0.12s ease;
+    }
+    .activity-item:hover .activity-view-btn { opacity: 1; }
+    .activity-view-btn:hover {
+      background: var(--indigo-glow);
+      border-color: rgba(99, 102, 241, 0.2);
+    }
+
+    /* ─── Stagger animations ─── */
+    .animate-in {
+      animation: fadeUp 0.4s var(--ease-out) both;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .delay-1 { animation-delay: 0.05s; }
+    .delay-2 { animation-delay: 0.1s; }
+    .delay-3 { animation-delay: 0.15s; }
+    .delay-4 { animation-delay: 0.2s; }
+    .delay-5 { animation-delay: 0.25s; }
+    .delay-6 { animation-delay: 0.3s; }
+
+    /* ─── Bottom grid ─── */
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* ─── Scrollbar ─── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+    /* ─── Disabled row ─── */
+    tr.disabled-row {
+      opacity: 0.5;
+    }
+    tr.disabled-row:hover { opacity: 0.75; }
+
+    /* ─── Keyboard shortcut hints ─── */
+    .kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      background: var(--bg-active);
+      border: 1px solid var(--border-default);
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-tertiary);
+      margin-left: 6px;
+    }
+
+    /* ─── Footer ─── */
+    .footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .footer-left {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer-left .version {
+      font-family: var(--font-mono);
+      background: var(--bg-elevated);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .footer-right {
+      display: flex;
+      gap: 8px;
+    }
+    .footer-link {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      text-decoration: none;
+      transition: color 0.12s ease;
+    }
+    .footer-link:hover { color: var(--indigo-400); }
+  </style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ─── Header ─── -->
+  <header class="animate-in">
+    <div class="logo-group">
+      <div class="logo-icon">
+        <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+          <rect width="64" height="64" rx="14" fill="#111638"/>
+          <circle cx="32" cy="32" r="24" fill="#0C1029" stroke="#1E1B4B" stroke-width="1"/>
+          <path d="M27 42 C27 32 29 27 32 24 C35 27 37 32 37 42Z" fill="#6366F1"/>
+          <rect x="25" y="42" width="14" height="2" rx="1" fill="#6366F1"/>
+          <circle cx="32" cy="46" r="1.5" fill="#6366F1"/>
+          <polygon points="34,25 29,33 32,32.5 30,39 37,30 34,30.5 35.5,25" fill="#FBBF24"/>
+          <line x1="32" y1="14" x2="32" y2="18" stroke="#FBBF24" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+          <line x1="25" y1="16" x2="27" y2="19" stroke="#FBBF24" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+          <line x1="39" y1="16" x2="37" y2="19" stroke="#FBBF24" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+        </svg>
+      </div>
+      <span class="logo-wordmark">WakeLite</span>
+    </div>
+
+    <div class="header-status">
+      <span class="status-dot"></span>
+      Healthy
+    </div>
+
+    <div class="header-sep"></div>
+
+    <div class="header-muted">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+      Notifications muted
+    </div>
+
+    <span class="header-spacer"></span>
+
+    <button class="btn-primary">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Timer
+    </button>
+  </header>
+
+  <!-- ─── Incidents Banner ─── -->
+  <div class="incidents-banner animate-in delay-1">
+    <svg class="alert-icon" viewBox="0 0 24 24" fill="none">
+      <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="#F87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span class="alert-text"><strong>10 unacknowledged incidents</strong> require attention</span>
+    <button class="alert-btn">Review Incidents</button>
+  </div>
+
+  <!-- ─── Metrics Row ─── -->
+  <div class="metrics">
+    <div class="metric-card animate-in delay-1">
+      <div class="metric-label">Timers Active</div>
+      <div class="metric-value">8<span class="denom">/9</span></div>
+      <div class="metric-sub">1 disabled</div>
+    </div>
+    <div class="metric-card animate-in delay-2">
+      <div class="metric-label">Active Runs</div>
+      <div class="metric-value">1</div>
+      <div class="metric-sub">slack-agent (daemon)</div>
+    </div>
+    <div class="metric-card danger animate-in delay-3">
+      <div class="metric-label">Unacked Incidents</div>
+      <div class="metric-value">10</div>
+      <div class="metric-sub">Oldest: 4d ago</div>
+    </div>
+    <div class="metric-card animate-in delay-4">
+      <div class="metric-label">Runner Uptime</div>
+      <div class="metric-value">33<span class="denom">h</span></div>
+      <div class="metric-sub">Since Mar 15, 07:00</div>
+    </div>
+  </div>
+
+  <!-- ─── Timers Section ─── -->
+  <div class="section-header animate-in delay-4">
+    <div style="display:flex;align-items:center;">
+      <span class="section-title">Timers</span>
+      <span class="section-count">9</span>
+    </div>
+    <div class="section-actions">
+      <button class="btn-ghost">All Types</button>
+      <button class="btn-ghost">Sort: Next Run</button>
+    </div>
+  </div>
+
+  <div class="timers-card animate-in delay-5">
+    <table class="timers-table">
+      <thead>
+        <tr>
+          <th style="width:30%">Timer</th>
+          <th>Schedule</th>
+          <th>Status</th>
+          <th>Next Run</th>
+          <th>Resources</th>
+          <th style="width:100px"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-daemon">
+                <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
+                Daemon
+              </span>
+              <div>
+                <div class="timer-name">slack-agent</div>
+                <div class="timer-comment">Slack socket-mode bot</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">continuous</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run running">running</span></td>
+          <td>
+            <div class="resource-tags">
+              <span class="resource-tag">slack-api</span>
+              <span class="resource-tag">claude-cli</span>
+            </div>
+          </td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="View logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg></button>
+              <button class="row-action-btn danger" title="Stop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-interval">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14l-4-4h3V6h2v6h3l-4 4z"/></svg>
+                Interval
+              </span>
+              <div>
+                <div class="timer-name">session-start-hello</div>
+                <div class="timer-comment">Greeting on session open</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">every 302m</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run soon">in 6h</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">evening-tasks-reminder</div>
+                <div class="timer-comment">Review daily tasks</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">once Mar 16 20:00</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run soon">in 4h</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">daily-merge-stable</div>
+                <div class="timer-comment">Merge stable/trunk daily</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 06:00</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run">in 14h</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">plane-db-backup</div>
+                <div class="timer-comment">Backup Plane SQLite DB</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 02:00</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run">tomorrow 02:00</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">organize-downloads</div>
+                <div class="timer-comment">Sort ~/Downloads by type</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 07:00</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run">in 15h</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">kb-audit</div>
+                <div class="timer-comment">Knowledge base health check</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">daily at 09:00</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run">in 17h</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-scheduled">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Sched
+              </span>
+              <div>
+                <div class="timer-name">claudeception-weekly</div>
+                <div class="timer-comment">Weekly knowledge extraction</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">Sun at 01:55</span></td>
+          <td><span class="status-chip status-on">ON</span></td>
+          <td><span class="next-run">in 7d</span></td>
+          <td>
+            <div class="resource-tags">
+              <span class="resource-tag">claude-cli</span>
+            </div>
+          </td>
+          <td>
+            <div class="row-actions">
+              <button class="row-action-btn" title="Run now"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn" title="Edit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div>
+          </td>
+        </tr>
+        <tr class="disabled-row">
+          <td>
+            <div class="timer-name-cell">
+              <span class="type-badge type-interval">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14l-4-4h3V6h2v6h3l-4 4z"/></svg>
+                Interval
+              </span>
+              <div>
+                <div class="timer-name">pr-99255-build-monitor</div>
+                <div class="timer-comment">Poll PR build status</div>
+              </div>
+            </div>
+          </td>
+          <td><span class="schedule-text">every 5m</span></td>
+          <td><span class="status-chip status-off">OFF</span></td>
+          <td><span class="next-run" style="color:var(--text-tertiary)">paused</span></td>
+          <td><div class="resource-tags"><span style="color:var(--text-tertiary)">—</span></div></td>
+          <td>
+            <div class="row-actions" style="opacity:1;">
+              <button class="row-action-btn" title="Enable" style="background:var(--green-bg); color:var(--green-400);"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg></button>
+              <button class="row-action-btn danger" title="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ─── Recent Activity ─── -->
+  <div class="section-header animate-in delay-5">
+    <div style="display:flex;align-items:center;">
+      <span class="section-title">Recent Activity</span>
+      <span class="section-count">20</span>
+    </div>
+    <div class="section-actions">
+      <button class="btn-ghost">All Statuses</button>
+    </div>
+  </div>
+
+  <div class="activity-card animate-in delay-6">
+    <div class="activity-date-group">
+      <div class="activity-date-label">Today</div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">session-start-hello</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">1h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">session-start-hello</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">4h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">organize-downloads</div>
+          <div class="activity-message">Completed successfully (3 runs)</div>
+        </div>
+        <span class="activity-time">7h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">kb-audit</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">7h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon failed">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">organize-downloads</div>
+          <div class="activity-message">exit code 1</div>
+        </div>
+        <span class="activity-time">9h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">session-start-hello</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">9h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">daily-merge-stable</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">10h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">plane-db-backup</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">14h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">claudeception-weekly</div>
+          <div class="activity-message">Completed successfully</div>
+        </div>
+        <span class="activity-time">14h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+    </div>
+
+    <div class="activity-date-group">
+      <div class="activity-date-label">Yesterday</div>
+
+      <div class="activity-item">
+        <div class="activity-icon success">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="activity-detail">
+          <div class="activity-timer-name">pr-99255-build-monitor</div>
+          <div class="activity-message">Completed successfully (3 runs)</div>
+        </div>
+        <span class="activity-time">18h ago</span>
+        <button class="activity-view-btn">View Logs</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Footer ─── -->
+  <div class="footer animate-in delay-6">
+    <div class="footer-left">
+      <span class="version">v2.0.0</span>
+      <span>Last heartbeat: 3s ago</span>
+    </div>
+    <div class="footer-right">
+      <a href="#" class="footer-link">API Docs</a>
+      <a href="#" class="footer-link">MCP</a>
+      <a href="#" class="footer-link">CLI</a>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

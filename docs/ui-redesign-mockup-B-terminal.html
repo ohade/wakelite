@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WakeLite — Terminal Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0a;
+      --bg-surface: #0d0d0d;
+      --green: #00ff41;
+      --green-dim: #00802a;
+      --green-dark: #1a3a1a;
+      --green-border: #1a3a1a;
+      --red: #ff3333;
+      --warning: #ffaa00;
+      --cyan: #00d4aa;
+      --white: #cccccc;
+      --font: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'Cascadia Code', monospace;
+    }
+
+    html { font-size: 13px; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--green);
+      min-height: 100vh;
+      overflow-x: hidden;
+      position: relative;
+    }
+
+    /* ── CRT Scanline Overlay ── */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      z-index: 9999;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0) 0px,
+        rgba(0, 0, 0, 0) 1px,
+        rgba(0, 0, 0, 0.15) 1px,
+        rgba(0, 0, 0, 0.15) 2px
+      );
+    }
+
+    /* ── CRT Screen Flicker ── */
+    body::after {
+      content: '';
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      pointer-events: none;
+      z-index: 9998;
+      animation: flicker 4s infinite;
+    }
+
+    @keyframes flicker {
+      0%, 100% { opacity: 0; }
+      3% { opacity: 0.02; background: rgba(0, 255, 65, 0.01); }
+      6% { opacity: 0; }
+      50% { opacity: 0; }
+      52% { opacity: 0.015; background: rgba(0, 255, 65, 0.008); }
+      54% { opacity: 0; }
+    }
+
+    /* ── Phosphor Glow Utility ── */
+    .glow {
+      text-shadow: 0 0 5px rgba(0, 255, 65, 0.5), 0 0 10px rgba(0, 255, 65, 0.2);
+    }
+    .glow-strong {
+      text-shadow: 0 0 8px rgba(0, 255, 65, 0.7), 0 0 20px rgba(0, 255, 65, 0.3), 0 0 40px rgba(0, 255, 65, 0.1);
+    }
+    .glow-red {
+      text-shadow: 0 0 8px rgba(255, 51, 51, 0.7), 0 0 20px rgba(255, 51, 51, 0.3);
+    }
+    .glow-warning {
+      text-shadow: 0 0 8px rgba(255, 170, 0, 0.6), 0 0 16px rgba(255, 170, 0, 0.2);
+    }
+
+    /* ── Container ── */
+    .terminal {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px 24px;
+    }
+
+    /* ── Header Bar ── */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--green-border);
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo {
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: 1px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.85rem;
+    }
+
+    .status-badge.healthy { color: var(--green); }
+    .status-badge .block { font-size: 0.7rem; }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 0.85rem;
+      color: var(--green-dim);
+    }
+
+    .uptime-counter { color: var(--green); }
+
+    .muted-badge { color: var(--warning); }
+
+    /* ── Incident Banner ── */
+    .incident-banner {
+      border: 2px solid var(--red);
+      padding: 10px 16px;
+      margin-bottom: 12px;
+      text-align: center;
+      font-weight: 600;
+      color: var(--red);
+      animation: pulse-border 1.5s ease-in-out infinite;
+      position: relative;
+      background: rgba(255, 51, 51, 0.04);
+    }
+
+    .incident-banner .blink-text {
+      animation: blink-harsh 1s step-end infinite;
+    }
+
+    @keyframes pulse-border {
+      0%, 100% { border-color: var(--red); box-shadow: 0 0 8px rgba(255, 51, 51, 0.2); }
+      50% { border-color: #ff6666; box-shadow: 0 0 20px rgba(255, 51, 51, 0.4), 0 0 40px rgba(255, 51, 51, 0.1); }
+    }
+
+    @keyframes blink-harsh {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* ── Stats Line ── */
+    .stats-line {
+      padding: 8px 0;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--green-border);
+      font-size: 0.9rem;
+      color: var(--green-dim);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .stats-line .stat-val { color: var(--green); }
+    .stats-line .stat-sep { color: #0d3d0d; padding: 0 6px; }
+    .stats-line .stat-alert { color: var(--red); }
+
+    /* ── Section Headers ── */
+    .section-header {
+      font-size: 0.8rem;
+      color: var(--green-dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      padding: 6px 0;
+    }
+
+    /* ── Timer Table ── */
+    .timer-table {
+      margin-bottom: 20px;
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+
+    .timer-table pre {
+      font-family: var(--font);
+      line-height: 1.65;
+      white-space: pre;
+      color: var(--green-dim);
+    }
+
+    .timer-table .tbl-header {
+      color: var(--green-dim);
+      font-weight: 500;
+    }
+
+    .timer-table .tbl-border {
+      color: #143514;
+    }
+
+    .timer-name { color: var(--green); font-weight: 500; }
+    .timer-name:hover {
+      text-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+      cursor: pointer;
+    }
+
+    .type-sch { color: var(--cyan); }
+    .type-int { color: var(--warning); }
+    .type-dmn { color: #d580ff; }
+
+    .type-sch-glow { text-shadow: 0 0 6px rgba(0, 212, 170, 0.4); }
+    .type-int-glow { text-shadow: 0 0 6px rgba(255, 170, 0, 0.4); }
+    .type-dmn-glow { text-shadow: 0 0 6px rgba(213, 128, 255, 0.4); }
+
+    .status-on { color: var(--green); }
+    .status-off { color: var(--red); }
+    .status-running { color: var(--green); animation: blink-soft 2s ease-in-out infinite; }
+
+    @keyframes blink-soft {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .next-run { color: var(--green-dim); }
+    .resources { color: #557755; font-size: 0.8rem; }
+
+    /* ── Activity Log ── */
+    .activity-log {
+      margin-bottom: 20px;
+    }
+
+    .log-entries {
+      font-size: 0.85rem;
+      line-height: 1.75;
+    }
+
+    .log-entry {
+      display: flex;
+      gap: 8px;
+      padding: 1px 0;
+      transition: text-shadow 0.2s;
+    }
+
+    .log-entry:hover {
+      text-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+    }
+
+    .log-ts { color: #557755; min-width: 10ch; }
+    .log-ok { color: var(--green); }
+    .log-fail { color: var(--red); }
+    .log-wait { color: #4488ff; }
+    .log-name { color: var(--green); min-width: 24ch; }
+    .log-status-completed { color: var(--green-dim); }
+    .log-status-failed { color: var(--red); font-weight: 600; }
+    .log-status-waiting { color: #4488ff; }
+    .log-ago { color: #334433; }
+
+    /* ── Footer / Prompt ── */
+    .footer {
+      padding: 12px 0;
+      border-top: 1px solid var(--green-border);
+      margin-top: 8px;
+    }
+
+    .prompt {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      font-size: 0.95rem;
+    }
+
+    .prompt-char { color: var(--green); }
+
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 1.2em;
+      background: var(--green);
+      animation: cursor-blink 1s step-end infinite;
+      margin-left: 2px;
+      vertical-align: text-bottom;
+      box-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+    }
+
+    @keyframes cursor-blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* ── ASCII Art top border ── */
+    .ascii-top {
+      color: #143514;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      margin-bottom: 4px;
+      user-select: none;
+    }
+
+    /* ── Hover glow on rows ── */
+    .timer-row {
+      transition: text-shadow 0.15s;
+    }
+    .timer-row:hover {
+      text-shadow: 0 0 6px rgba(0, 255, 65, 0.3);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--green-dark); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
+
+    /* ── Responsive ── */
+    @media (max-width: 800px) {
+      html { font-size: 11px; }
+      .terminal { padding: 10px 12px; }
+      .header { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="terminal">
+
+  <!-- ASCII Art Banner -->
+  <pre class="ascii-top">
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                    ║
+║   ██╗    ██╗ █████╗ ██╗  ██╗███████╗██╗     ██╗████████╗███████╗                   ║
+║   ██║    ██║██╔══██╗██║ ██╔╝██╔════╝██║     ██║╚══██╔══╝██╔════╝                   ║
+║   ██║ █╗ ██║███████║█████╔╝ █████╗  ██║     ██║   ██║   █████╗                     ║
+║   ██║███╗██║██╔══██║██╔═██╗ ██╔══╝  ██║     ██║   ██║   ██╔══╝                     ║
+║   ╚███╔███╔╝██║  ██║██║  ██╗███████╗███████╗██║   ██║   ███████╗                   ║
+║    ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝   ╚═╝   ╚══════╝                   ║
+║                                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝</pre>
+
+  <!-- Header Bar -->
+  <div class="header">
+    <div class="header-left">
+      <span class="logo glow-strong">[WAKELITE v2.0.0]</span>
+      <span class="status-badge healthy glow">
+        <span class="block">■</span> HEALTHY
+      </span>
+    </div>
+    <div class="header-right">
+      <span>UPTIME: <span class="uptime-counter glow" id="uptime">33h 12m 47s</span></span>
+      <span class="muted-badge glow-warning">[NOTIFICATIONS: MUTED]</span>
+    </div>
+  </div>
+
+  <!-- Incident Banner -->
+  <div class="incident-banner">
+    <span class="blink-text glow-red">!! 10 UNACKED INCIDENTS — REVIEW NOW !!</span>
+  </div>
+
+  <!-- Stats Line -->
+  <div class="stats-line">
+    <span>TIMERS: <span class="stat-val">8/9</span> active</span>
+    <span class="stat-sep">│</span>
+    <span>RUNS: <span class="stat-val">1</span> active</span>
+    <span class="stat-sep">│</span>
+    <span>INCIDENTS: <span class="stat-alert glow-red">10</span> unacked</span>
+    <span class="stat-sep">│</span>
+    <span>UPTIME: <span class="stat-val" id="stats-uptime">33h 12m</span></span>
+  </div>
+
+  <!-- Timers Section -->
+  <div class="section-header">── TIMERS ──────────────────────────────────────────────────────────────</div>
+  <div class="timer-table">
+    <pre><span class="tbl-border">┌──────────────────────────┬───────┬──────────────────┬────────┬────────────────────┬──────────────────────┐</span>
+<span class="tbl-header">│ NAME                     │ TYPE  │ SCHEDULE         │ STATUS │ NEXT RUN           │ RESOURCES            │</span>
+<span class="tbl-border">├──────────────────────────┼───────┼──────────────────┼────────┼────────────────────┼──────────────────────┤</span>
+<span class="timer-row">│ <span class="timer-name">slack-agent</span>              │ <span class="type-dmn type-dmn-glow">[DMN]</span> │ continuous       │ <span class="status-running">[ON ]</span> │ <span class="status-running">■ running</span>           │ <span class="resources">slack-api, claude-cli</span> │</span>
+<span class="timer-row">│ <span class="timer-name">session-start-hello</span>      │ <span class="type-int type-int-glow">[INT]</span> │ every 302m       │ <span class="status-on">[ON ]</span> │ <span class="next-run">in 6h</span>               │                      │</span>
+<span class="timer-row">│ <span class="timer-name">evening-tasks-reminder</span>   │ <span class="type-sch type-sch-glow">[SCH]</span> │ once Mar 16 20:00│ <span class="status-on">[ON ]</span> │ <span class="next-run">in 4h</span>               │                      │</span>
+<span class="timer-row">│ <span class="timer-name">daily-merge-stable</span>       │ <span class="type-sch type-sch-glow">[SCH]</span> │ daily 06:00      │ <span class="status-on">[ON ]</span> │ <span class="next-run">in 14h</span>              │                      │</span>
+<span class="timer-row">│ <span class="timer-name">plane-db-backup</span>          │ <span class="type-sch type-sch-glow">[SCH]</span> │ daily 02:00      │ <span class="status-on">[ON ]</span> │ <span class="next-run">tomorrow 02:00</span>      │                      │</span>
+<span class="timer-row">│ <span class="timer-name">organize-downloads</span>       │ <span class="type-sch type-sch-glow">[SCH]</span> │ daily 07:00      │ <span class="status-on">[ON ]</span> │ <span class="next-run">in 15h</span>              │                      │</span>
+<span class="timer-row">│ <span class="timer-name">kb-audit</span>                 │ <span class="type-sch type-sch-glow">[SCH]</span> │ daily 09:00      │ <span class="status-on">[ON ]</span> │ <span class="next-run">in 17h</span>              │                      │</span>
+<span class="timer-row">│ <span class="timer-name">claudeception-weekly</span>     │ <span class="type-sch type-sch-glow">[SCH]</span> │ Sun 01:55        │ <span class="status-on">[ON ]</span> │ <span class="next-run">in 7d</span>               │ <span class="resources">claude-cli</span>           │</span>
+<span class="timer-row">│ <span class="timer-name">pr-99255-build-monitor</span>   │ <span class="type-int type-int-glow">[INT]</span> │ every 5m         │ <span class="status-off">[OFF]</span> │ <span style="color:#555">paused</span>              │                      │</span>
+<span class="tbl-border">└──────────────────────────┴───────┴──────────────────┴────────┴────────────────────┴──────────────────────┘</span></pre>
+  </div>
+
+  <!-- Activity Log -->
+  <div class="section-header">── ACTIVITY LOG ────────────────────────────────────────────────────────</div>
+  <div class="activity-log">
+    <div class="log-entries">
+      <div class="log-entry">
+        <span class="log-ts">[16:04:02]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">session-start-hello</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(1h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[12:02:00]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">session-start-hello</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(5h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[09:10:57]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">organize-downloads</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(7h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[07:00:00]</span>
+        <span class="log-fail glow-red">✗</span>
+        <span class="log-name" style="color:var(--red)">organize-downloads</span>
+        <span class="log-status-failed glow-red">FAILED       exit 1</span>
+        <span class="log-ago">(10h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[06:00:00]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">daily-merge-stable</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(11h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[02:00:03]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">plane-db-backup</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(15h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[01:55:00]</span>
+        <span class="log-ok">✓</span>
+        <span class="log-name">claudeception-weekly</span>
+        <span class="log-status-completed">completed</span>
+        <span class="log-ago">(15h ago)</span>
+      </div>
+      <div class="log-entry">
+        <span class="log-ts">[00:15:22]</span>
+        <span class="log-wait">◆</span>
+        <span class="log-name" style="color:#4488ff">pr-99255-build-monitor</span>
+        <span class="log-status-waiting">waiting      exit 75</span>
+        <span class="log-ago">(17h ago)</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer / Prompt -->
+  <div class="footer">
+    <div class="prompt">
+      <span class="prompt-char glow">wakelite&gt; </span><span class="cursor"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ── Uptime Counter ──
+  (function () {
+    let hours = 33, minutes = 12, seconds = 47;
+
+    function tick() {
+      seconds++;
+      if (seconds >= 60) { seconds = 0; minutes++; }
+      if (minutes >= 60) { minutes = 0; hours++; }
+
+      const pad = (n) => String(n).padStart(2, '0');
+      const full = hours + 'h ' + pad(minutes) + 'm ' + pad(seconds) + 's';
+      const short = hours + 'h ' + pad(minutes) + 'm';
+
+      document.getElementById('uptime').textContent = full;
+      document.getElementById('stats-uptime').textContent = short;
+    }
+
+    setInterval(tick, 1000);
+  })();
+
+  // ── Subtle random glitch effect on the ASCII banner ──
+  (function () {
+    const banner = document.querySelector('.ascii-top');
+    if (!banner) return;
+    const original = banner.textContent;
+
+    function glitch() {
+      const chars = original.split('');
+      const numGlitches = Math.floor(Math.random() * 4) + 1;
+
+      for (let i = 0; i < numGlitches; i++) {
+        const idx = Math.floor(Math.random() * chars.length);
+        if (chars[idx] !== '\n' && chars[idx] !== ' ') {
+          const glitchChars = '░▒▓█▀▄▌▐│┤╡╢╖╕╣║╗╝╜╛┐';
+          chars[idx] = glitchChars[Math.floor(Math.random() * glitchChars.length)];
+        }
+      }
+
+      banner.textContent = chars.join('');
+      setTimeout(() => { banner.textContent = original; }, 80);
+    }
+
+    setInterval(glitch, 4000 + Math.random() * 6000);
+  })();
+</script>
+
+</body>
+</html>
