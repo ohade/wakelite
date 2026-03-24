@@ -148,6 +148,56 @@ def _cmd_timer_run_now(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_timer_clone(args: argparse.Namespace) -> None:
+    overrides: Dict[str, Any] = {}
+    if args.name:
+        overrides["name"] = args.name
+    if args.patch_file:
+        overrides.update(json.loads(Path(args.patch_file).read_text(encoding="utf-8")))
+    payload: Dict[str, Any] = {"idempotency_key": args.idempotency_key}
+    payload.update(overrides)
+    _print_json(_api_call("POST", f"/v1/timers/{args.timer_id}/clone", payload))
+
+
+def _cmd_timer_from_template(args: argparse.Namespace) -> None:
+    overrides: Dict[str, Any] = {"name": args.name}
+    if args.comment:
+        overrides["comment"] = args.comment
+    if args.shell:
+        overrides["command"] = {"mode": "shell", "shell": args.shell}
+    rec: Dict[str, Any] = {}
+    if args.time:
+        rec["time"] = args.time
+    if args.date:
+        rec["date"] = args.date
+    if args.every:
+        rec["every"] = args.every
+    if rec:
+        overrides["recurrence"] = rec
+    # Auto-capture WezTerm pane_id for callback templates
+    if args.template == "callback":
+        wezterm_pane = os.environ.get("WEZTERM_PANE")
+        if wezterm_pane:
+            try:
+                overrides.setdefault("callback", {})["pane_id"] = int(wezterm_pane)
+            except (ValueError, TypeError):
+                pass
+    payload: Dict[str, Any] = {
+        "template": args.template,
+        "overrides": overrides,
+        "idempotency_key": args.idempotency_key,
+    }
+    _print_json(_api_call("POST", "/v1/timers/from-template", payload))
+
+
+def _cmd_template_list(args: argparse.Namespace) -> None:
+    _print_json(_api_call("GET", "/v1/templates"))
+
+
+def _cmd_template_show(args: argparse.Namespace) -> None:
+    _print_json(_api_call("GET", f"/v1/templates/{args.name}"))
+
+
 def _cmd_runs_list(args: argparse.Namespace) -> None:
     query = f"?limit={args.limit}"
     if args.timer_id:
@@ -355,6 +405,28 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
     timer_run_now.add_argument("timer_id")
     timer_run_now.add_argument("--idempotency-key", required=True)
 
+    timer_clone = timer_sub.add_parser("clone", help="clone an existing timer")
+    timer_clone.add_argument("timer_id")
+    timer_clone.add_argument("--name", help="override timer name")
+    timer_clone.add_argument("--patch-file", help="JSON file with override fields")
+    timer_clone.add_argument("--idempotency-key", default=str(uuid4()))
+
+    timer_from_tpl = timer_sub.add_parser("from-template", help="create timer from a template")
+    timer_from_tpl.add_argument("template", help="template name (e.g. reminder, callback, health-check)")
+    timer_from_tpl.add_argument("--name", required=True, help="timer name")
+    timer_from_tpl.add_argument("--shell", help="shell command")
+    timer_from_tpl.add_argument("--time", help="run time HH:MM")
+    timer_from_tpl.add_argument("--date", help="date YYYY-MM-DD (for once timers)")
+    timer_from_tpl.add_argument("--every", help="interval (e.g. 5m, 30s)")
+    timer_from_tpl.add_argument("--comment", help="timer description")
+    timer_from_tpl.add_argument("--idempotency-key", default=str(uuid4()))
+
+    template = sub.add_parser("template", help="template operations")
+    template_sub = template.add_subparsers(dest="template_cmd", required=True)
+    template_sub.add_parser("list", help="list available templates")
+    template_show = template_sub.add_parser("show", help="show template details")
+    template_show.add_argument("name", help="template name")
+
     runs = sub.add_parser("runs", help="run history")
     runs_sub = runs.add_subparsers(dest="runs_cmd", required=True)
     runs_list = runs_sub.add_parser("list")
@@ -441,6 +513,20 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
             return
         if args.timer_cmd == "run-now":
             _cmd_timer_run_now(args)
+            return
+        if args.timer_cmd == "clone":
+            _cmd_timer_clone(args)
+            return
+        if args.timer_cmd == "from-template":
+            _cmd_timer_from_template(args)
+            return
+
+    if args.cmd == "template":
+        if args.template_cmd == "list":
+            _cmd_template_list(args)
+            return
+        if args.template_cmd == "show":
+            _cmd_template_show(args)
             return
 
     if args.cmd == "runs":
