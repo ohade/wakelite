@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib import error, request
 
-from .config import API_HOST, API_PORT, MCP_HTTP_HOST, MCP_HTTP_PORT
+from .config import API_HOST, API_PORT, MCP_HTTP_HOST, MCP_HTTP_PORT, auto_capture_terminal
 
 
 SERVER_NAME = "wakelite-mcp"
@@ -192,15 +192,9 @@ def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return _api_request("GET", "/v1/timers")
     if name == "wakelite.v1.timer.create":
         timer_payload = dict(arguments.get("timer", {}))
-        # Auto-capture WezTerm pane_id if callback is present but pane_id missing
         cb = timer_payload.get("callback")
-        if cb and cb.get("pane_id") is None:
-            wezterm_pane = os.environ.get("WEZTERM_PANE")
-            if wezterm_pane:
-                try:
-                    cb["pane_id"] = int(wezterm_pane)
-                except (ValueError, TypeError):
-                    pass
+        if cb:
+            auto_capture_terminal(cb)
         return _api_request("POST", "/v1/timers", {
             "idempotency_key": arguments["idempotency_key"],
             **timer_payload,

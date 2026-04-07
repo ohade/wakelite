@@ -133,11 +133,14 @@ class TimerStore:
             if not isinstance(callback, dict):
                 raise ValueError("callback must be an object")
             cb_type = callback.get("type")
-            if cb_type != "wezterm":
-                raise ValueError("callback.type must be 'wezterm' (only supported type)")
+            if cb_type not in ("wezterm", "ghostty"):
+                raise ValueError("callback.type must be 'wezterm' or 'ghostty'")
             pane_id = callback.get("pane_id")
             if pane_id is not None and not isinstance(pane_id, int):
                 raise ValueError("callback.pane_id must be an integer")
+            terminal_id = callback.get("terminal_id")
+            if terminal_id is not None and not isinstance(terminal_id, str):
+                raise ValueError("callback.terminal_id must be a string")
             session_id = callback.get("session_id")
             if session_id is not None and not isinstance(session_id, str):
                 raise ValueError("callback.session_id must be a string")

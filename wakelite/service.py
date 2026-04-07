@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -31,6 +32,7 @@ from .config import (
 from .notifier import Notifier
 from .recurrence import interval_is_due, interval_window_occurrences, next_occurrence, next_window_occurrence, occurrences_between, parse_interval, parse_recurrence, upcoming_occurrences
 from .state import StateStore
+from .templates import _deep_merge, get_template, list_templates, resolve_template
 from .timer_store import TimerStore
 from .utils import atomic_write_json
 
@@ -312,6 +314,52 @@ class WakeLiteService:
         )
         self._signal_wake()
         return result
+
+    def clone_timer(self, source_id: str, overrides: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
+        source = self.timer_store.get_timer(source_id)
+        if not source:
+            raise KeyError(source_id)
+
+        # Build clone payload: strip metadata, apply overrides
+        payload = copy.deepcopy(source)
+        for key in ("id", "created_at", "updated_at", "next_run"):
+            payload.pop(key, None)
+        if "name" not in overrides:
+            payload["name"] = f"{source['name']} (copy)"
+        payload = _deep_merge(payload, overrides)
+
+        can_proceed, warnings, error_msg = self.check_capacity(payload)
+        if not can_proceed:
+            raise CapacityExceededError(error_msg)
+
+        def _clone() -> Dict[str, Any]:
+            timer = self.timer_store.create_timer(payload)
+            result: Dict[str, Any] = {"timer": timer}
+            if warnings:
+                result["warnings"] = warnings
+            return result
+
+        result = self._idempotent(
+            scope=f"timer.clone:{source_id}",
+            idem_key=idempotency_key,
+            payload=payload,
+            fn=_clone,
+        )
+        self._signal_wake()
+        return result
+
+    def list_templates(self) -> List[Dict[str, Any]]:
+        return list_templates()
+
+    def get_template(self, name: str) -> Dict[str, Any]:
+        tpl = get_template(name)
+        if tpl is None:
+            raise KeyError(name)
+        return tpl
+
+    def create_from_template(self, template_name: str, overrides: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
+        payload = resolve_template(template_name, overrides)
+        return self.create_timer(payload, idempotency_key)
 
     def update_timer(self, timer_id: str, patch: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         # Build the projected timer for capacity check
@@ -792,6 +840,7 @@ class WakeLiteService:
         run_id: str,
         stdout_path: str,
         duration_seconds: float,
+        slack_thread_ts: Optional[str] = None,
     ) -> None:
         """Fire callback if configured. Only on success/failed, never waiting/aborted."""
         callback = timer.get("callback")
@@ -825,12 +874,16 @@ class WakeLiteService:
                 f"This timer was created during your session. Act on the results above."
             )
 
-            if callback.get("type") == "wezterm":
+            cb_type = callback.get("type")
+            if cb_type in ("wezterm", "ghostty"):
                 # Write signal file for UserPromptSubmit hook to pick up
                 session_id = callback.get("session_id")
                 if session_id:
-                    self._write_callback_signal(session_id, timer_name, status, exit_code, duration_str, stdout_tail)
-                self._wezterm_callback(callback, message, timer, timer_name, status)
+                    self._write_callback_signal(session_id, run_id, timer_name, status, exit_code, duration_str, stdout_tail)
+                if cb_type == "ghostty":
+                    self._ghostty_callback(callback, message, timer, timer_name, status, slack_thread_ts=slack_thread_ts)
+                else:
+                    self._wezterm_callback(callback, message, timer, timer_name, status, slack_thread_ts=slack_thread_ts)
         except Exception:
             logger.warning("Callback failed for timer %s", timer.get("id"), exc_info=True)
 
@@ -847,21 +900,27 @@ class WakeLiteService:
     def _write_callback_signal(
         self,
         session_id: str,
+        run_id: str,
         timer_name: str,
         status: str,
         exit_code: Optional[int],
         duration_str: str,
         stdout_tail: str,
     ) -> None:
-        """Write callback data to signal file for Claude Code hook to pick up."""
+        """Write callback data to signal file for Claude Code hook to pick up.
+
+        Uses run_id in filename to prevent overlapping callbacks from
+        overwriting each other (bug found during /consult 2026-04-07).
+        """
         import datetime as _dt
 
         signal_dir = Path.home() / ".claude" / "session-signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
-        signal_file = signal_dir / f"{session_id}.wakelite-callback.json"
+        signal_file = signal_dir / f"{session_id}.{run_id}.wakelite-callback.json"
 
         signal_data = {
             "timer_name": timer_name,
+            "run_id": run_id,
             "status": status,
             "exit_code": exit_code,
             "duration": duration_str,
@@ -872,7 +931,8 @@ class WakeLiteService:
         logger.info("Wrote callback signal file: %s", signal_file)
 
     def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
-                          timer_name: str = "", status: str = "") -> None:
+                          timer_name: str = "", status: str = "",
+                          slack_thread_ts: Optional[str] = None) -> None:
         """Send short trigger to WezTerm pane, with Slack + resume fallback.
 
         If a signal file was written (session_id present), sends only a short
@@ -925,16 +985,18 @@ class WakeLiteService:
                 logger.warning("WezTerm pane check failed for pane %d", pane_id, exc_info=True)
 
         # Fallback: pane gone or no pane_id
-        self._wezterm_fallback(callback, message, timer)
+        self._wezterm_fallback(callback, message, timer, slack_thread_ts=slack_thread_ts)
 
-    def _wezterm_fallback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any]) -> None:
+    def _wezterm_fallback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
+                          slack_thread_ts: Optional[str] = None) -> None:
         """Fallback: Slack DM + optionally spawn new WezTerm tab with claude --resume."""
         timer_name = timer.get("name", timer.get("id", "unknown"))
         self.notifier.notify_slack(
             f":warning: *Callback fallback* — pane gone\n"
             f"Timer: *{timer_name}*\n"
             f"Results delivered to new tab (or Slack only if no session_id).\n\n"
-            f"```\n{message[:1500]}\n```"
+            f"```\n{message[:1500]}\n```",
+            thread_ts=slack_thread_ts,
         )
 
         session_id = callback.get("session_id")
@@ -970,6 +1032,133 @@ class WakeLiteService:
         except Exception:
             logger.warning("Resume spawn failed for session %s", session_id, exc_info=True)
 
+    # ── Ghostty callback ──────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_terminal_id(callback: Dict[str, Any]) -> Optional[str]:
+        """Resolve the freshest Ghostty terminal ID for this session.
+
+        Checks the terminal-registry.jsonl (written by SessionStart hook)
+        for the most recent entry matching this session_id. Falls back to
+        the terminal_id stored at timer creation time.
+        """
+        session_id = callback.get("session_id")
+        stored_id = callback.get("terminal_id")
+
+        if not session_id:
+            return stored_id
+
+        registry = Path.home() / ".claude" / "session-signals" / "terminal-registry.jsonl"
+        if not registry.exists():
+            return stored_id
+
+        # Read registry, find freshest entry for this session
+        freshest_id = None
+        try:
+            for line in registry.read_text().strip().splitlines():
+                try:
+                    entry = json.loads(line)
+                    if entry.get("session_id") == session_id:
+                        freshest_id = entry.get("terminal_id")
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+
+        return freshest_id or stored_id
+
+    def _ghostty_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
+                           timer_name: str = "", status: str = "",
+                           slack_thread_ts: Optional[str] = None) -> None:
+        """Send short trigger to Ghostty terminal via AppleScript, with Slack + resume fallback."""
+        terminal_id = self._resolve_terminal_id(callback)
+        session_id = callback.get("session_id")
+
+        if session_id and timer_name:
+            trigger = f"[WakeLite: {timer_name} completed ({status})]"
+        else:
+            trigger = message
+
+        if terminal_id:
+            try:
+                # Check terminal exists
+                result = subprocess.run(
+                    ["osascript", "-e",
+                     f'tell application "Ghostty" to exists terminal id "{terminal_id}"'],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip() == "true":
+                    # Focus terminal
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'tell application "Ghostty" to focus terminal id "{terminal_id}"'],
+                        capture_output=True, timeout=5,
+                    )
+                    # Inject text (paste mode)
+                    escaped = trigger.replace('\\', '\\\\').replace('"', '\\"')
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'tell application "Ghostty" to input text "{escaped}" to terminal id "{terminal_id}"'],
+                        capture_output=True, timeout=5,
+                    )
+                    time.sleep(2.0)  # Claude Code TUI needs time to settle
+                    # Press Enter
+                    for attempt in range(3):
+                        enter_result = subprocess.run(
+                            ["osascript", "-e",
+                             f'tell application "Ghostty" to send key "enter" to terminal id "{terminal_id}"'],
+                            capture_output=True, timeout=5,
+                        )
+                        if enter_result.returncode == 0:
+                            break
+                        time.sleep(1.0 * (attempt + 1))
+                    logger.info("Ghostty callback delivered to terminal %s for timer %s",
+                                terminal_id, timer.get("id"))
+                    return
+            except Exception:
+                logger.warning("Ghostty terminal check failed for %s", terminal_id, exc_info=True)
+
+        # Fallback: terminal gone or no terminal_id
+        self._ghostty_fallback(callback, message, timer, slack_thread_ts=slack_thread_ts)
+
+    def _ghostty_fallback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
+                           slack_thread_ts: Optional[str] = None) -> None:
+        """Fallback: Slack DM + optionally spawn new Ghostty tab with claude --resume."""
+        timer_name = timer.get("name", timer.get("id", "unknown"))
+        self.notifier.notify_slack(
+            f":warning: *Callback fallback* — terminal gone\n"
+            f"Timer: *{timer_name}*\n"
+            f"Results delivered to new tab (or Slack only if no session_id).\n\n"
+            f"```\n{message[:1500]}\n```",
+            thread_ts=slack_thread_ts,
+        )
+
+        session_id = callback.get("session_id")
+        if not session_id:
+            logger.info("No session_id for ghostty callback fallback, Slack only for timer %s", timer.get("id"))
+            return
+
+        try:
+            cwd = timer.get("command", {}).get("workingDirectory") or str(Path.home())
+            escaped_cwd = cwd.replace('\\', '\\\\').replace('"', '\\"')
+            result = subprocess.run(
+                ["osascript", "-e", f'''tell application "Ghostty"
+    set cfg to new surface configuration
+    set command of cfg to "claude --resume {session_id}"
+    set initial working directory of cfg to "{escaped_cwd}"
+    new tab with configuration cfg
+end tell'''],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                logger.info("Spawned Ghostty resume tab for session %s", session_id)
+                time.sleep(3)  # Wait for Claude Code to initialize
+                # No need to inject text — claude --resume picks up the signal file
+            else:
+                logger.warning("Failed to spawn Ghostty resume tab: %s", result.stderr)
+        except Exception:
+            logger.warning("Ghostty resume spawn failed for session %s", session_id, exc_info=True)
+
     def _run_occurrence(
         self,
         timer: Dict[str, Any],
@@ -991,6 +1180,22 @@ class WakeLiteService:
         )
         run_id = run_ctx["run_id"]
         self.state.set_runtime_running(timer_id, run_id, scheduled_at)
+
+        # For timers not bound to a specific session, create a Slack thread
+        # so all notifications for this run are grouped under one parent.
+        slack_thread_ts: Optional[str] = None
+        callback = timer.get("callback") or {}
+        session_bound = callback.get("type") in ("wezterm", "ghostty") and bool(callback.get("session_id"))
+        if not session_bound:
+            timer_name = timer.get("name", timer_id)
+            slack_thread_ts = self.notifier.get_daily_thread_ts()
+            if slack_thread_ts:
+                self.notifier.notify_slack(
+                    f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
+                    f"Run: `{run_id}`\n"
+                    f"Scheduled: {scheduled_at}",
+                    thread_ts=slack_thread_ts,
+                )
 
         date_dir = datetime.now().strftime("%Y-%m-%d")
         run_dir = LOG_DIR / timer_id / date_dir
@@ -1079,7 +1284,7 @@ class WakeLiteService:
 
         # Fire callback if configured (success/failed only)
         duration_seconds = time.monotonic() - run_start_mono
-        self._execute_callback(timer, status, exit_code, run_id, str(stdout_path), duration_seconds)
+        self._execute_callback(timer, status, exit_code, run_id, str(stdout_path), duration_seconds, slack_thread_ts=slack_thread_ts)
 
         runtime = self.state.set_runtime_idle(timer_id, run_id=run_id)
 
@@ -1114,7 +1319,8 @@ class WakeLiteService:
                 self.notifier.notify_slack(
                     f":wastebasket: Timer auto-deleted: *{timer_name}*\n"
                     f"Condition: `{trigger}=delete` triggered\n"
-                    f"Exit code: {exit_code}"
+                    f"Exit code: {exit_code}",
+                    thread_ts=slack_thread_ts,
                 )
                 self._signal_wake()
                 return
@@ -1133,6 +1339,26 @@ class WakeLiteService:
             self.notifier.notify(
                 "WakeLite success",
                 f"{timer.get('name', timer_id)} completed at {scheduled_at}",
+            )
+
+        # Always close the Slack thread with a status reply (if we opened one).
+        # This is independent of macOS notification preferences — the thread parent
+        # already created the Slack "noise", so leaving it without a reply is worse.
+        if slack_thread_ts:
+            if status == "aborted":
+                emoji, label = ":stop_sign:", "Aborted"
+            elif status == "waiting":
+                emoji, label = ":large_blue_circle:", "Waiting"
+            elif status == "success":
+                emoji, label = ":white_check_mark:", "Success"
+            else:
+                emoji, label = ":x:", "Failed"
+            duration_str = self._format_duration(time.monotonic() - run_start_mono)
+            self.notifier.notify_slack(
+                f"{emoji} *{label}* — {timer.get('name', timer_id)}\n"
+                f"Exit code: {exit_code} | Duration: {duration_str}\n"
+                f"{message}",
+                thread_ts=slack_thread_ts,
             )
 
         queued_scheduled = self.state.pop_queue_once(timer_id)
@@ -1388,7 +1614,10 @@ class WakeLiteService:
     def _prune(self) -> None:
         summary = self.state.prune_old_data(DEFAULT_RETENTION_DAYS)
         log_summary = self._prune_run_log_files(RUN_LOG_RETENTION_DAYS)
-        logger.info("Pruned old data: db=%s run_logs=%s", summary, log_summary)
+        registry_pruned = self._prune_terminal_registry(max_age_hours=24)
+        signals_pruned = self._prune_signal_files(max_age_hours=24)
+        logger.info("Pruned old data: db=%s run_logs=%s registry=%d signals=%d",
+                     summary, log_summary, registry_pruned, signals_pruned)
 
     def _repair_stale_runtime_locks(self) -> set[str]:
         repaired: set[str] = set()
@@ -1436,6 +1665,95 @@ class WakeLiteService:
             return Path(path).exists()
         except Exception:
             return False
+
+    @staticmethod
+    def _ghostty_terminal_alive(terminal_id: str) -> Optional[bool]:
+        """Check if a Ghostty terminal still exists. Returns None if Ghostty is unreachable."""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "Ghostty" to exists terminal id "{terminal_id}"'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip() == "true"
+            return None  # Ghostty not running or errored
+        except Exception:
+            return None
+
+    @staticmethod
+    def _prune_terminal_registry(max_age_hours: int = 24) -> int:
+        """Prune stale entries from terminal-registry.jsonl.
+
+        Smart eviction: asks Ghostty if each terminal still exists.
+        Falls back to TTL if Ghostty is unreachable.
+        """
+        registry = Path.home() / ".claude" / "session-signals" / "terminal-registry.jsonl"
+        if not registry.exists():
+            return 0
+        cutoff = time.time() - (max_age_hours * 3600)
+
+        # Probe Ghostty once to see if it's reachable
+        ghostty_available = False
+        try:
+            probe = subprocess.run(
+                ["osascript", "-e", 'tell application "Ghostty" to return name of front window'],
+                capture_output=True, text=True, timeout=3,
+            )
+            ghostty_available = probe.returncode == 0
+        except Exception:
+            pass
+
+        kept = []
+        pruned = 0
+        try:
+            for line in registry.read_text().strip().splitlines():
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    pruned += 1
+                    continue
+
+                tid = entry.get("terminal_id")
+                ts = entry.get("ts", 0)
+
+                if ghostty_available and tid:
+                    # Smart: ask Ghostty if terminal is alive
+                    alive = WakeLiteService._ghostty_terminal_alive(tid)
+                    if alive is False:
+                        pruned += 1
+                        continue
+                    # alive is True or None (error) — keep it
+                    kept.append(line)
+                else:
+                    # Fallback: TTL-based
+                    if ts >= cutoff:
+                        kept.append(line)
+                    else:
+                        pruned += 1
+
+            if pruned > 0:
+                registry.write_text("\n".join(kept) + "\n" if kept else "")
+        except Exception:
+            logger.warning("Failed to prune terminal registry", exc_info=True)
+        return pruned
+
+    @staticmethod
+    def _prune_signal_files(max_age_hours: int = 24) -> int:
+        """Remove stale wakelite-callback signal files older than max_age_hours."""
+        signal_dir = Path.home() / ".claude" / "session-signals"
+        if not signal_dir.exists():
+            return 0
+        pruned = 0
+        cutoff = time.time() - (max_age_hours * 3600)
+        try:
+            for f in signal_dir.glob("*.wakelite-callback.json"):
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    pruned += 1
+        except Exception:
+            logger.warning("Failed to prune signal files", exc_info=True)
+        return pruned
 
     def _prune_run_log_files(self, retention_days: int) -> Dict[str, int]:
         files_deleted = 0

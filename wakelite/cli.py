@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from urllib import error, request
 from uuid import uuid4
 
-from .config import API_HOST, API_PORT
+from .config import API_HOST, API_PORT, auto_capture_terminal
 from .launchd_install import install_system, install_user, status as launchd_status, uninstall_system, uninstall_user
 from .mcp_manifest import generate_manifest, install_global_configs, manual_snippets
 from .reconciler import main as reconciler_main
@@ -70,15 +70,9 @@ def _cmd_timer_list(args: argparse.Namespace) -> None:
 
 def _cmd_timer_create(args: argparse.Namespace) -> None:
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    # Auto-capture WezTerm pane_id if callback is present but pane_id missing
     cb = payload.get("callback")
-    if cb and cb.get("pane_id") is None:
-        wezterm_pane = os.environ.get("WEZTERM_PANE")
-        if wezterm_pane:
-            try:
-                cb["pane_id"] = int(wezterm_pane)
-            except (ValueError, TypeError):
-                pass
+    if cb:
+        auto_capture_terminal(cb)
     payload["idempotency_key"] = args.idempotency_key
     _print_json(_api_call("POST", "/v1/timers", payload))
 
@@ -174,14 +168,10 @@ def _cmd_timer_from_template(args: argparse.Namespace) -> None:
         rec["every"] = args.every
     if rec:
         overrides["recurrence"] = rec
-    # Auto-capture WezTerm pane_id for callback templates
+    # Auto-capture terminal ID for callback templates
     if args.template == "callback":
-        wezterm_pane = os.environ.get("WEZTERM_PANE")
-        if wezterm_pane:
-            try:
-                overrides.setdefault("callback", {})["pane_id"] = int(wezterm_pane)
-            except (ValueError, TypeError):
-                pass
+        cb = overrides.setdefault("callback", {})
+        auto_capture_terminal(cb)
     payload: Dict[str, Any] = {
         "template": args.template,
         "overrides": overrides,

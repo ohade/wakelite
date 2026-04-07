@@ -21,6 +21,17 @@ def _bootstrap(temp_home: str):
     importlib.reload(timer_store)
     importlib.reload(service)
 
+    # Prevent tests from posting real Slack messages.
+    # Tests that need to assert on Slack calls should still use
+    # patch.object(svc.notifier, "notify_slack") for explicit control.
+    _real_init = service.WakeLiteService.__init__
+
+    def _patched_init(self, *a, **kw):
+        _real_init(self, *a, **kw)
+        self.notifier.notify_slack = unittest.mock.MagicMock(return_value="fake-ts-1234")
+
+    service.WakeLiteService.__init__ = _patched_init
+
     return service.WakeLiteService
 
 
@@ -178,11 +189,12 @@ class ServiceTests(unittest.TestCase):
             svc = WakeLiteService(tick_seconds=1)
             timer = svc.timer_store.create_timer(_basic_timer("queue", "sleep 1"))
 
-            svc._schedule_occurrence(timer, "2026-02-24T01:55:00", is_catchup=False, queued_reason=None)
-            time.sleep(0.15)
-            svc._schedule_occurrence(timer, "2026-02-24T01:55:30", is_catchup=False, queued_reason=None)
-            svc._schedule_occurrence(timer, "2026-02-24T01:56:00", is_catchup=False, queued_reason=None)
-            time.sleep(2.6)
+            with patch.object(svc.notifier, "notify_slack"):
+                svc._schedule_occurrence(timer, "2026-02-24T01:55:00", is_catchup=False, queued_reason=None)
+                time.sleep(0.15)
+                svc._schedule_occurrence(timer, "2026-02-24T01:55:30", is_catchup=False, queued_reason=None)
+                svc._schedule_occurrence(timer, "2026-02-24T01:56:00", is_catchup=False, queued_reason=None)
+                time.sleep(2.6)
 
             runs = svc.list_runs(limit=10, timer_id=timer["id"])
             self.assertEqual(len(runs), 2)
@@ -856,15 +868,27 @@ class UntilConditionTests(unittest.TestCase):
 
                 # Timer deleted
                 self.assertIsNone(svc.timer_store.get_timer(timer_id))
-                # Slack was called
-                mock_slack.assert_called_once()
-                msg = mock_slack.call_args[0][0]
-                self.assertIn("slack-notify-test", msg)
-                self.assertIn("on_success", msg)
-                self.assertIn("exit code", msg.lower() if msg.lower() else msg)
+                # Slack called 3x: daily thread parent + started reply + auto-delete reply
+                self.assertEqual(mock_slack.call_count, 3)
+                # First call creates daily thread parent
+                daily_msg = mock_slack.call_args_list[0][0][0]
+                self.assertIn("Timer activity", daily_msg)
+                # Second call is "started" reply
+                started_msg = mock_slack.call_args_list[1][0][0]
+                self.assertIn("slack-notify-test", started_msg)
+                self.assertIn("started", started_msg.lower())
+                # Third call is auto-delete with thread_ts
+                delete_msg = mock_slack.call_args_list[2][0][0]
+                self.assertIn("slack-notify-test", delete_msg)
+                self.assertIn("on_success", delete_msg)
+                self.assertIn("thread_ts", mock_slack.call_args_list[2][1])
 
     def test_until_no_slack_when_timer_survives(self):
-        """WL-11: No Slack DM when until condition is NOT met."""
+        """WL-11: No until-delete Slack DM when until condition is NOT met.
+
+        Timer still gets thread parent + thread close (for the failed run),
+        but no auto-delete message.
+        """
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
             svc = WakeLiteService(tick_seconds=1)
@@ -878,7 +902,10 @@ class UntilConditionTests(unittest.TestCase):
 
                 # Timer survives (failed, but on_success=delete only)
                 self.assertIsNotNone(svc.timer_store.get_timer(timer["id"]))
-                mock_slack.assert_not_called()
+                # Daily thread parent + started reply + thread close (no auto-delete)
+                self.assertEqual(mock_slack.call_count, 3)
+                msgs = [c[0][0] for c in mock_slack.call_args_list]
+                self.assertFalse(any("auto-deleted" in m for m in msgs))
 
 
 class WaitingStatusTests(unittest.TestCase):
@@ -939,6 +966,13 @@ def _callback_timer(name: str, shell: str = "echo callback-ok", pane_id: int = 4
     return t
 
 
+def _ghostty_callback_timer(name: str, shell: str = "echo callback-ok",
+                            terminal_id: str = "ABCD-1234-UUID", session_id: str = "sess-456"):
+    t = _basic_timer(name, shell)
+    t["callback"] = {"type": "ghostty", "terminal_id": terminal_id, "session_id": session_id}
+    return t
+
+
 class CallbackTests(unittest.TestCase):
     """Tests for the WezTerm callback feature."""
 
@@ -951,13 +985,14 @@ class CallbackTests(unittest.TestCase):
             )
 
             pane_list_json = json.dumps([{"pane_id": 42, "title": "test"}])
-            with patch("wakelite.service.subprocess.run") as mock_run:
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
                 # Mock wezterm cli list returning our pane
                 mock_run.return_value = unittest.mock.Mock(
                     returncode=0, stdout=pane_list_json, stderr=""
                 )
                 svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
-                time.sleep(2.0)
+                time.sleep(4.0)
 
                 # Verify wezterm cli send-text was called
                 send_calls = [c for c in mock_run.call_args_list if "send-text" in str(c)]
@@ -972,12 +1007,13 @@ class CallbackTests(unittest.TestCase):
             )
 
             pane_list_json = json.dumps([{"pane_id": 42, "title": "test"}])
-            with patch("wakelite.service.subprocess.run") as mock_run:
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
                 mock_run.return_value = unittest.mock.Mock(
                     returncode=0, stdout=pane_list_json, stderr=""
                 )
                 svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
-                time.sleep(2.0)
+                time.sleep(4.0)
 
                 send_calls = [c for c in mock_run.call_args_list if "send-text" in str(c)]
                 self.assertTrue(len(send_calls) >= 1, f"Expected send-text calls for failed run")
@@ -991,7 +1027,8 @@ class CallbackTests(unittest.TestCase):
                 _callback_timer("cb-waiting", "exit 75")
             )
 
-            with patch("wakelite.service.subprocess.run") as mock_run:
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
                 svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
                 time.sleep(2.0)
 
@@ -1008,7 +1045,8 @@ class CallbackTests(unittest.TestCase):
                 _basic_timer("no-callback", "echo ok")
             )
 
-            with patch("wakelite.service.subprocess.run") as mock_run:
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
                 svc._schedule_occurrence(timer, "2026-03-03T10:00:00", is_catchup=False, queued_reason=None)
                 time.sleep(2.0)
 
@@ -1047,6 +1085,210 @@ class CallbackTests(unittest.TestCase):
                 # spawn should have been called with claude --resume
                 spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
                 self.assertTrue(len(spawn_calls) >= 1, f"Expected spawn call, got: {mock_run.call_args_list}")
+
+
+class GhosttyCallbackTests(unittest.TestCase):
+    """Tests for the Ghostty callback feature."""
+
+    def test_ghostty_callback_fires_on_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _ghostty_callback_timer("ghostty-success", "echo hello-ghostty")
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
+                # Mock osascript returning "true" for exists check
+                mock_run.return_value = unittest.mock.Mock(
+                    returncode=0, stdout="true\n", stderr=""
+                )
+                svc._schedule_occurrence(timer, "2026-04-07T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(4.0)
+
+                # Verify osascript was called with Ghostty commands
+                osascript_calls = [c for c in mock_run.call_args_list if "osascript" in str(c)]
+                self.assertTrue(len(osascript_calls) >= 1, f"Expected osascript calls, got: {mock_run.call_args_list}")
+
+    def test_ghostty_callback_fallback_when_terminal_gone(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _ghostty_callback_timer("ghostty-fallback", "echo fallback", terminal_id="GONE-UUID")
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack") as mock_slack:
+                # Mock osascript returning "false" for exists check
+                mock_run.return_value = unittest.mock.Mock(
+                    returncode=0, stdout="false\n", stderr=""
+                )
+                svc._schedule_occurrence(timer, "2026-04-07T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(3.0)
+
+                # Slack fallback should fire
+                mock_slack.assert_called()
+                slack_msg = mock_slack.call_args[0][0]
+                self.assertIn("fallback", slack_msg.lower())
+
+    def test_ghostty_validation_accepts_type(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _ghostty_callback_timer("ghostty-valid")
+            )
+            self.assertEqual(timer["callback"]["type"], "ghostty")
+            self.assertEqual(timer["callback"]["terminal_id"], "ABCD-1234-UUID")
+
+    def test_signal_file_includes_run_id(self):
+        """Signal file name should include run_id to prevent overwrites."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                _ghostty_callback_timer("signal-runid", "echo signal-test")
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack"):
+                mock_run.return_value = unittest.mock.Mock(
+                    returncode=0, stdout="true\n", stderr=""
+                )
+                svc._schedule_occurrence(timer, "2026-04-07T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(4.0)
+
+                # Check signal file was written with run_id in name
+                signal_dir = Path.home() / ".claude" / "session-signals"
+                signal_files = list(signal_dir.glob("sess-456.*.wakelite-callback.json"))
+                self.assertTrue(len(signal_files) >= 1,
+                                f"Expected signal file with run_id, found: {list(signal_dir.glob('*'))}")
+                # Verify run_id is in the JSON payload
+                data = json.loads(signal_files[0].read_text())
+                self.assertIn("run_id", data)
+
+
+class AutoCaptureTerminalTests(unittest.TestCase):
+    """Tests for the shared auto_capture_terminal helper."""
+
+    def test_captures_ghostty_from_env(self):
+        from wakelite.config import auto_capture_terminal
+        cb = {"type": "ghostty"}
+        with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "uuid-123"}, clear=False):
+            auto_capture_terminal(cb)
+        self.assertEqual(cb["terminal_id"], "uuid-123")
+
+    def test_captures_wezterm_from_env(self):
+        from wakelite.config import auto_capture_terminal
+        cb = {"type": "wezterm"}
+        with patch.dict(os.environ, {"WEZTERM_PANE": "42"}, clear=False):
+            # Remove GHOSTTY_TERMINAL_ID if present to test wezterm path
+            env = {"WEZTERM_PANE": "42"}
+            with patch.dict(os.environ, env, clear=False):
+                if "GHOSTTY_TERMINAL_ID" in os.environ:
+                    del os.environ["GHOSTTY_TERMINAL_ID"]
+                auto_capture_terminal(cb)
+        self.assertEqual(cb["pane_id"], 42)
+
+    def test_ghostty_takes_precedence(self):
+        from wakelite.config import auto_capture_terminal
+        cb = {}
+        with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "uuid-456", "WEZTERM_PANE": "99"}, clear=False):
+            auto_capture_terminal(cb)
+        self.assertEqual(cb.get("type"), "ghostty")
+        self.assertEqual(cb.get("terminal_id"), "uuid-456")
+        self.assertNotIn("pane_id", cb)
+
+    def test_does_not_overwrite_explicit_values(self):
+        from wakelite.config import auto_capture_terminal
+        cb = {"type": "ghostty", "terminal_id": "explicit-id"}
+        with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "env-id"}, clear=False):
+            auto_capture_terminal(cb)
+        self.assertEqual(cb["terminal_id"], "explicit-id")
+
+
+class CloneTimerTests(unittest.TestCase):
+    def test_clone_creates_copy_with_new_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            original = svc.timer_store.create_timer(_basic_timer("original"))
+            result = svc.clone_timer(original["id"], {}, "clone-key-1")
+            cloned = result["timer"]
+            self.assertNotEqual(cloned["id"], original["id"])
+            self.assertEqual(cloned["name"], "original (copy)")
+            self.assertEqual(cloned["command"]["shell"], original["command"]["shell"])
+            self.assertEqual(cloned["recurrence"]["frequency"], "daily")
+
+    def test_clone_applies_name_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            original = svc.timer_store.create_timer(_basic_timer("original"))
+            result = svc.clone_timer(original["id"], {"name": "custom-clone"}, "clone-key-2")
+            self.assertEqual(result["timer"]["name"], "custom-clone")
+
+    def test_clone_applies_patch_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            original = svc.timer_store.create_timer(_basic_timer("original"))
+            result = svc.clone_timer(
+                original["id"],
+                {"name": "patched", "command": {"mode": "shell", "shell": "echo patched"}},
+                "clone-key-3",
+            )
+            self.assertEqual(result["timer"]["command"]["shell"], "echo patched")
+
+    def test_clone_nonexistent_timer_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            with self.assertRaises(KeyError):
+                svc.clone_timer("nonexistent-id", {}, "clone-key-4")
+
+    def test_clone_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            original = svc.timer_store.create_timer(_basic_timer("original"))
+            r1 = svc.clone_timer(original["id"], {}, "clone-idem-key")
+            r2 = svc.clone_timer(original["id"], {}, "clone-idem-key")
+            self.assertEqual(r1["timer"]["id"], r2["timer"]["id"])
+            # Should still be only 2 timers (original + 1 clone)
+            self.assertEqual(len(svc.timer_store.list_timers()), 2)
+
+
+class CreateFromTemplateTests(unittest.TestCase):
+    def test_create_from_reminder_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            result = svc.create_from_template(
+                "reminder",
+                {
+                    "name": "test-reminder",
+                    "comment": "test",
+                    "recurrence": {"date": "2030-01-01", "time": "09:00"},
+                    "command": {"shell": "echo remind"},
+                },
+                "tpl-key-1",
+            )
+            timer = result["timer"]
+            self.assertEqual(timer["name"], "test-reminder")
+            self.assertEqual(timer["recurrence"]["frequency"], "once")
+            self.assertTrue(timer["wake"]["enabled"])
+            self.assertEqual(timer["until"]["on_success"], "delete")
+
+    def test_create_from_unknown_template_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            with self.assertRaises(ValueError) as ctx:
+                svc.create_from_template("nonexistent", {"name": "x", "comment": "x"}, "tpl-key-2")
+            self.assertIn("Unknown template", str(ctx.exception))
 
 
 if __name__ == "__main__":

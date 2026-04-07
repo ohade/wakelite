@@ -39,3 +39,28 @@ CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 def ensure_dirs() -> None:
     for d in (HOME_DIR, RUN_DIR, LOG_DIR, MANIFEST_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def auto_capture_terminal(callback: dict) -> None:
+    """Auto-detect terminal type and ID from environment, mutating callback in-place.
+
+    Checks $GHOSTTY_TERMINAL_ID first (preferred), then $WEZTERM_PANE.
+    Sets callback.type and the appropriate ID field if not already set.
+    """
+    if callback is None or not isinstance(callback, dict):
+        return
+
+    ghostty_id = os.environ.get("GHOSTTY_TERMINAL_ID")
+    wezterm_pane = os.environ.get("WEZTERM_PANE")
+
+    if ghostty_id:
+        callback.setdefault("type", "ghostty")
+        if callback.get("type") == "ghostty" and callback.get("terminal_id") is None:
+            callback["terminal_id"] = ghostty_id
+    elif wezterm_pane:
+        callback.setdefault("type", "wezterm")
+        if callback.get("type") == "wezterm" and callback.get("pane_id") is None:
+            try:
+                callback["pane_id"] = int(wezterm_pane)
+            except (ValueError, TypeError):
+                pass

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from .config import API_HOST, API_PORT, SOCKET_PATH
+from .config import API_HOST, API_PORT, SOCKET_PATH, auto_capture_terminal
 from .service import CapacityExceededError, IdempotencyConflictError, WakeLiteService
 
 
@@ -1357,15 +1357,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 idem_key = self._require_idempotency(body)
                 payload = {k: v for k, v in body.items() if k != "idempotency_key"}
-                # Auto-capture WezTerm pane_id if callback is present but pane_id missing
                 cb = payload.get("callback")
-                if cb and cb.get("pane_id") is None:
-                    wezterm_pane = os.environ.get("WEZTERM_PANE")
-                    if wezterm_pane:
-                        try:
-                            cb["pane_id"] = int(wezterm_pane)
-                        except (ValueError, TypeError):
-                            pass
+                if cb:
+                    auto_capture_terminal(cb)
                 self._send_json(200, self.service.create_timer(payload, idem_key))
                 return
 
@@ -1403,6 +1397,56 @@ class ApiHandler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 idem_key = self._require_idempotency(body)
                 self._send_json(200, self.service.run_timer_now(timer_id, idem_key))
+                return
+
+            if method == "POST" and path.endswith("/clone") and path.startswith("/v1/timers/"):
+                timer_id = path.split("/")[-2]
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                overrides = {k: v for k, v in body.items() if k != "idempotency_key"}
+                self._send_json(200, self.service.clone_timer(timer_id, overrides, idem_key))
+                return
+
+            if method == "GET" and path == "/v1/templates":
+                self._send_json(200, {"templates": self.service.list_templates()})
+                return
+
+            if method == "GET" and path.startswith("/v1/templates/"):
+                tpl_name = path[len("/v1/templates/"):]
+                try:
+                    tpl = self.service.get_template(tpl_name)
+                except KeyError:
+                    raise ApiError(404, f"template '{tpl_name}' not found")
+                self._send_json(200, {"template": tpl})
+                return
+
+            if method == "POST" and path == "/v1/timers/from-template":
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                template_name = body.get("template")
+                if not template_name:
+                    raise ApiError(400, "'template' field is required")
+                overrides = body.get("overrides", {})
+                cb = overrides.get("callback")
+                if cb:
+                    auto_capture_terminal(cb)
+                try:
+                    self._send_json(200, self.service.create_from_template(template_name, overrides, idem_key))
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+                return
+
+            if method == "GET" and path == "/v1/system/wezterm-panes":
+                import subprocess as _sp
+                try:
+                    result = _sp.run(
+                        ["wezterm", "cli", "list", "--format", "json"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    panes = json.loads(result.stdout) if result.returncode == 0 else []
+                except Exception:
+                    panes = []
+                self._send_json(200, {"panes": panes})
                 return
 
             if method == "GET" and path == "/v1/runs":
