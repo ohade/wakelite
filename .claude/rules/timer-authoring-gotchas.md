@@ -37,14 +37,17 @@ Hard-won lessons from building and debugging timers. Read before creating timers
 
 ## Callback
 
-- **`callback` is optional top-level field.** Reconnects timer results to the originating WezTerm terminal session.
-- **`pane_id` is auto-captured** from `$WEZTERM_PANE` if not explicitly provided (CLI, MCP, REST API).
+- **`callback` is optional top-level field.** Reconnects timer results to the terminal session.
+- **Supported types:** `"ghostty"` (preferred) and `"wezterm"`. Auto-detected from env vars at creation time.
+- **Auto-capture:** `auto_capture_terminal()` in `config.py` detects `$GHOSTTY_TERMINAL_ID` (preferred) or `$WEZTERM_PANE` and sets the correct type + ID. No need to specify type manually.
+- **Ghostty:** Uses AppleScript (`input text` + `send key "enter"`). `terminal_id` is a UUID string from `$GHOSTTY_TERMINAL_ID`.
+- **WezTerm:** Uses `wezterm cli send-text`. `pane_id` is an integer from `$WEZTERM_PANE`.
 - **Callback only fires on `success`/`failed`.** Never on `waiting` (exit 75) or `aborted`.
-- **Results are auto-submitted.** The message is pasted into the pane AND Enter is pressed, so Claude Code receives it as a prompt.
-- **Fallback when pane is gone:** Slack DM + new WezTerm tab with `claude --resume <session_id>` (if `session_id` is set).
-- **Supported types:** Only `"wezterm"` in v1. Extensible later to `"shell"`, `"webhook"`.
-- **`--no-paste` with `\r` is critical for the Enter keypress.** `wezterm cli send-text` uses bracketed paste by default — pasted text does NOT trigger Enter in TUI apps like Claude Code. The submit must use `--no-paste` with `\r` (carriage return, 0x0d), NOT `\n` (line feed, 0x0a). Terminals send `\r` for Enter — `\n` gets silently dropped or creates a literal newline in the input. The message body itself should use default (paste) mode so embedded newlines render as text, not keypresses.
-- **Best paired with `until`:** Use `"until": {"on_success": "delete", "on_failure": "continue"}` for poll-until-done patterns (build monitoring, deploy checks).
+- **Results are auto-submitted.** Text is pasted into the terminal AND Enter is pressed, so Claude Code receives it as a prompt.
+- **Signal file is the data channel.** Full callback data goes to `~/.claude/session-signals/{session_id}.{run_id}.wakelite-callback.json`. Terminal injection is just a short trigger.
+- **Stale terminal resolution:** A SessionStart hook writes to `terminal-registry.jsonl`. WakeLite reads the freshest terminal_id at fire time, not the creation-time value.
+- **Fallback when terminal is gone:** Slack DM + new tab with `claude --resume <session_id>` (Ghostty: AppleScript `new tab with configuration`; WezTerm: `cli spawn`).
+- **Best paired with `until`:** Use `"until": {"on_success": "delete", "on_failure": "continue"}` for poll-until-done patterns.
 
 ## CLI gotchas
 
