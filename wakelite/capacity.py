@@ -56,7 +56,9 @@ def parse_rate(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return int(value) if value >= 0 else None
+        if value < 0:
+            return None
+        return int(math.ceil(float(value)))
     if not isinstance(value, str):
         return None
 
@@ -70,18 +72,19 @@ def parse_rate(value: Any) -> Optional[int]:
         return None
     if amount < 0:
         return None
-    amount_int = int(math.ceil(amount))
 
     if time_unit is None:
-        return amount_int
+        return int(math.ceil(amount))
     tu = time_unit.lower()
     if tu in ("s", "sec", "second"):
-        return amount_int * 60
+        return int(math.ceil(amount * 60))
     if tu in ("m", "min", "minute"):
-        return amount_int
+        return int(math.ceil(amount))
     if tu in ("h", "hr", "hour"):
-        return max(1, amount_int // 60) if amount_int > 0 else 0
-    return amount_int
+        if amount == 0:
+            return 0
+        return int(math.ceil(amount / 60))
+    return int(math.ceil(amount))
 
 
 def collect_timer_usage(timer: Dict[str, Any]) -> List[ResourceUsage]:
@@ -91,14 +94,20 @@ def collect_timer_usage(timer: Dict[str, Any]) -> List[ResourceUsage]:
 
     usages: List[ResourceUsage] = []
 
-    execution = timer.get("execution") or {}
-    overlap = execution.get("overlap", "queue")
-    if overlap == "allow":
-        slot_amount = execution.get("max_concurrent", 1)
-        if not isinstance(slot_amount, int) or slot_amount < 1:
-            slot_amount = 1
-    else:
+    # Daemons: the runtime keeps exactly one live process regardless of
+    # execution.overlap / max_concurrent, so the admission gate must treat
+    # them as a single slot. Non-daemon timers honor overlap=allow.
+    if timer.get("timer_type") == "daemon":
         slot_amount = 1
+    else:
+        execution = timer.get("execution") or {}
+        overlap = execution.get("overlap", "queue")
+        if overlap == "allow":
+            slot_amount = execution.get("max_concurrent", 1)
+            if not isinstance(slot_amount, int) or slot_amount < 1:
+                slot_amount = 1
+        else:
+            slot_amount = 1
     usages.append(ResourceUsage(EXECUTOR_RESOURCE, slot_amount))
 
     for res in timer.get("resources") or []:
@@ -116,19 +125,24 @@ def collect_timer_usage(timer: Dict[str, Any]) -> List[ResourceUsage]:
 def resource_capacity(
     name: str, timers: List[Dict[str, Any]], max_workers: int
 ) -> Optional[int]:
-    """Ceiling for `name` — executor slot uses `max_workers`; user resources
-    look up the first parseable `capacity:` among declaring timers.
+    """Ceiling for `name` — executor slot uses `max_workers`. For user
+    resources, take the MIN across all parseable `capacity:` declarations
+    so the gate is deterministic regardless of timer storage order and
+    conservative when declarations disagree.
     """
     if name == EXECUTOR_RESOURCE:
         return max_workers
+    caps: List[int] = []
     for t in timers:
         for res in t.get("resources") or []:
             if res.get("name") != name:
                 continue
             cap = parse_rate(res.get("capacity"))
             if cap is not None and cap > 0:
-                return cap
-    return None
+                caps.append(cap)
+    if not caps:
+        return None
+    return min(caps)
 
 
 def _is_daemon_or_zero_interval(timer: Dict[str, Any]) -> bool:
@@ -169,13 +183,32 @@ def _timer_run_windows(
         return
 
     # Non-windowed interval timers: timestamp-based fires. occurrences_between
-    # returns [] for these (active_hours-less interval), so we project ourselves.
+    # returns [] for these (active_hours-less interval), so project ourselves.
+    # Seed from the persisted scheduler phase when available (`_last_fired_at`,
+    # populated by service.check_capacity before calling the engine). Without
+    # it we'd project every existing interval timer as firing at `now`, which
+    # artificially synchronizes unrelated timers and produces false 409s.
     every = _interval_seconds(timer)
     rec = timer.get("recurrence") or {}
     if every is not None and not (rec.get("active_hours")):
-        t = now
         step = timedelta(seconds=every)
         duration = timedelta(seconds=run_duration_seconds)
+        last_fired_raw = timer.get("_last_fired_at")
+        t = now
+        if last_fired_raw:
+            try:
+                last_fired = datetime.fromisoformat(
+                    last_fired_raw.replace("Z", "+00:00")
+                    if isinstance(last_fired_raw, str) else last_fired_raw.isoformat()
+                )
+                if last_fired.tzinfo is not None and now.tzinfo is None:
+                    last_fired = last_fired.replace(tzinfo=None)
+                nxt = last_fired + step
+                while nxt <= now:
+                    nxt += step
+                t = nxt
+            except (ValueError, AttributeError):
+                pass
         while t < horizon_end:
             yield (t, min(t + duration, horizon_end))
             t += step
@@ -207,6 +240,10 @@ def project_concurrent_usage(
         return {}
 
     projection: Dict[str, List[int]] = {}
+    # Use epoch seconds (via .timestamp()) for bucket arithmetic so DST
+    # transitions don't shift the axis — datetime subtraction on naive
+    # local-time values silently miscounts across spring-forward/fall-back.
+    now_epoch = now.timestamp()
 
     for timer in timers:
         usages = collect_timer_usage(timer)
@@ -215,8 +252,8 @@ def project_concurrent_usage(
         for start, end in _timer_run_windows(timer, now, horizon_end, run_duration_seconds):
             if end <= start:
                 continue
-            start_off = max(0.0, (start - now).total_seconds())
-            end_off = max(0.0, (end - now).total_seconds())
+            start_off = max(0.0, start.timestamp() - now_epoch)
+            end_off = max(0.0, end.timestamp() - now_epoch)
             start_idx = int(start_off // bucket_seconds)
             end_idx = int(math.ceil(end_off / bucket_seconds))
             start_idx = max(0, start_idx)
@@ -277,6 +314,15 @@ def _env_positive_int(name: str, default: int) -> int:
     return v if v > 0 else default
 
 
+def _env_gate_enabled() -> bool:
+    """WAKELITE_CAPACITY_ENABLED=false|0|no disables the gate (admit all).
+    Rollback lever: operators can turn the gate off without a code revert."""
+    raw = os.environ.get("WAKELITE_CAPACITY_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("false", "0", "no", "off", "disabled")
+
+
 def check_capacity(
     new_timer: Dict[str, Any],
     existing_timers: List[Dict[str, Any]],
@@ -288,6 +334,8 @@ def check_capacity(
     run_duration_seconds: Optional[int] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Gate admission of `new_timer`. Returns (can_proceed, error_msg)."""
+    if not _env_gate_enabled():
+        return (True, None)
     now = now or datetime.now()
     horizon_days = (
         horizon_days

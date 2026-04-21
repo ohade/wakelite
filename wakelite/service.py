@@ -246,12 +246,22 @@ class WakeLiteService:
             timer["completed_runs"] = self.state.count_completed_runs(timer["id"])
         return timer
 
-    def _estimate_slots(self, timer: Dict[str, Any]) -> int:
-        """Estimate executor slots a single active run of this timer consumes."""
-        for usage in capacity.collect_timer_usage(timer):
-            if usage.name == capacity.EXECUTOR_RESOURCE:
-                return usage.amount
-        return 0
+    def _enrich_with_last_fired(self, timer: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp `_last_fired_at` on interval timers so capacity.py can phase
+        their projection correctly. Non-interval and brand-new timers are
+        unchanged. Returns a shallow copy; the store's dict is not mutated."""
+        rec = timer.get("recurrence") or {}
+        if rec.get("frequency") != "interval":
+            return timer
+        tid = timer.get("id")
+        if not tid:
+            return timer
+        last_fired_raw = self.state.get_meta(f"interval.last_fired.{tid}")
+        if not last_fired_raw:
+            return timer
+        enriched = dict(timer)
+        enriched["_last_fired_at"] = last_fired_raw
+        return enriched
 
     def check_capacity(self, new_timer: Dict[str, Any], exclude_timer_id: Optional[str] = None) -> tuple:
         """Check if adding/updating a timer would violate per-resource capacity
@@ -262,9 +272,19 @@ class WakeLiteService:
         warnings: List[str] = list(
             self.timer_store.check_resource_conflicts(new_timer, exclude_timer_id)
         )
+        existing = [
+            self._enrich_with_last_fired(t) for t in self.timer_store.list_timers()
+        ]
+        # On update, attach the updating timer's real phase too so raising
+        # estimated_usage is evaluated against the existing fire schedule.
+        evaluated_new = new_timer
+        if exclude_timer_id:
+            evaluated_new = self._enrich_with_last_fired(
+                {**new_timer, "id": new_timer.get("id") or exclude_timer_id}
+            )
         can_proceed, error_msg = capacity.check_capacity(
-            new_timer,
-            self.timer_store.list_timers(),
+            evaluated_new,
+            existing,
             self.max_workers,
             exclude_timer_id=exclude_timer_id,
         )
