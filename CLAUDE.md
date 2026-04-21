@@ -51,6 +51,7 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `timer_store.py` | Timer CRUD on `~/.wakelite/timers.json`. Validates schema, thread-safe |
 | `state.py` | SQLite (`~/.wakelite/state.db`) — run history, runtime state, daemon state, incidents |
 | `notifier.py` | macOS notifications (`osascript`) + Slack DMs (`notify_slack()`) |
+| `capacity.py` | Time-axis per-resource admission gate. Projects each timer's resource use onto N-minute buckets over a 7-day horizon, blocks create/update when any resource's peak > capacity. Pure functions, no I/O |
 | `service.py` | **Core orchestrator.** Scheduler loop, run execution (ThreadPoolExecutor), timer lifecycle |
 | `http_api.py` | REST API handler + embedded web UI (single-file HTML/CSS/JS in Python string) |
 | `mcp_server.py` | MCP protocol bridge — translates MCP tool calls to REST API calls |

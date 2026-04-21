@@ -28,6 +28,7 @@ from .config import (
     WAKE_INTENTS_FILE,
     ensure_dirs,
 )
+from . import capacity
 from .notifier import Notifier
 from .recurrence import interval_is_due, interval_window_occurrences, next_occurrence, next_window_occurrence, occurrences_between, parse_interval, parse_recurrence, upcoming_occurrences
 from .state import StateStore
@@ -246,50 +247,28 @@ class WakeLiteService:
         return timer
 
     def _estimate_slots(self, timer: Dict[str, Any]) -> int:
-        """Estimate how many executor slots this timer would consume."""
-        if not timer.get("enabled", True):
-            return 0
-        execution = timer.get("execution", {})
-        overlap = execution.get("overlap", "queue")
-        if overlap == "allow":
-            return execution.get("max_concurrent", 1)
-        return 1  # daemon, interval, or calendar timer = 1 slot
+        """Estimate executor slots a single active run of this timer consumes."""
+        for usage in capacity.collect_timer_usage(timer):
+            if usage.name == capacity.EXECUTOR_RESOURCE:
+                return usage.amount
+        return 0
 
     def check_capacity(self, new_timer: Dict[str, Any], exclude_timer_id: Optional[str] = None) -> tuple:
-        """Check if adding/updating a timer would exceed max_workers.
+        """Check if adding/updating a timer would violate per-resource capacity
+        anywhere across the projection horizon.
 
         Returns (can_proceed: bool, warnings: list[str], error_msg: str | None).
         """
-        warnings: List[str] = []
-        error_msg: Optional[str] = None
-
-        # Resource conflict warnings
-        warnings.extend(self.timer_store.check_resource_conflicts(new_timer, exclude_timer_id))
-
-        # Capacity check
-        total_slots = 0
-        slot_details: List[str] = []
-        for t in self.timer_store.list_timers():
-            if exclude_timer_id and t["id"] == exclude_timer_id:
-                continue
-            slots = self._estimate_slots(t)
-            if slots > 0:
-                total_slots += slots
-                slot_details.append(f'{t.get("name", t["id"])} ({t.get("timer_type", "scheduled")}, {slots} slot{"s" if slots > 1 else ""})')
-
-        new_slots = self._estimate_slots(new_timer)
-        projected = total_slots + new_slots
-
-        if projected > self.max_workers:
-            error_msg = (
-                f"Adding this timer would exceed max concurrent capacity ({self.max_workers}). "
-                f"Current utilization: {total_slots}/{self.max_workers} active slots. "
-                f"Active timers: {', '.join(slot_details[:5])}"
-            )
-            if len(slot_details) > 5:
-                error_msg += f" ... and {len(slot_details) - 5} more"
-
-        return (error_msg is None, warnings, error_msg)
+        warnings: List[str] = list(
+            self.timer_store.check_resource_conflicts(new_timer, exclude_timer_id)
+        )
+        can_proceed, error_msg = capacity.check_capacity(
+            new_timer,
+            self.timer_store.list_timers(),
+            self.max_workers,
+            exclude_timer_id=exclude_timer_id,
+        )
+        return (can_proceed, warnings, error_msg)
 
     def create_timer(self, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         # Pre-check capacity before idempotent wrapper
