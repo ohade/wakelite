@@ -183,13 +183,18 @@ Optional. Reconnects timer results to the originating terminal session.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `type` | string | yes | — | Callback mechanism. v1: `"wezterm"` only |
+| `type` | string | yes | — | Callback mechanism: `"wezterm"`, `"ghostty"`, or `"cmux"` |
 | `pane_id` | int | no | from `$WEZTERM_PANE` | WezTerm pane to inject results into. Auto-captured at creation if env var is set |
+| `terminal_id` | string | no | from `$GHOSTTY_TERMINAL_ID` | Ghostty terminal to inject results into. Auto-captured at creation if env var is set |
+| `workspace_id` | string | for cmux | from `$CMUX_WORKSPACE_ID` | cmux workspace ID |
+| `surface_id` | string | for cmux | from `$CMUX_SURFACE_ID` or `$CMUX_PANEL_ID` | cmux surface ID. `panel_id` is accepted as an input alias and normalized to `surface_id` during validation |
+| `socket_path` | string | no | from `$CMUX_SOCKET_PATH` | Optional cmux socket path passed to callback subprocesses |
+| `cli_path` | string | no | detected cmux CLI | Optional cmux CLI path. Auto-capture checks `$CMUX_BUNDLED_CLI_PATH`, `/opt/homebrew/bin/cmux`, `/usr/local/bin/cmux`, then `/Applications/cmux.app/Contents/Resources/bin/cmux` |
 | `session_id` | string | no | `null` | Claude Code session ID for `--resume` fallback when pane is gone |
 
 **Behavior:**
 - Callback fires on `success` and `failed` status only. Never on `waiting` (exit 75) or `aborted`.
-- `pane_id` is auto-captured from `$WEZTERM_PANE` when creating via CLI, MCP, or REST API (if the server process has the env var).
+- Terminal identity is auto-captured when creating via CLI, MCP, or REST API if the server process has the relevant environment variables. Detection order is cmux, Ghostty, then WezTerm.
 - **Happy path:** If the pane exists, results are injected via `wezterm cli send-text` and auto-submitted (Enter pressed). Claude Code receives it as a new prompt.
 - **Fallback:** If the pane is gone, a Slack DM is sent. If `session_id` is set, a new WezTerm tab opens with `claude --resume <session_id>` and results are injected there.
 
@@ -202,6 +207,35 @@ Optional. Reconnects timer results to the originating terminal session.
   }
 }
 ```
+
+cmux example:
+
+```json
+{
+  "callback": {
+    "type": "cmux",
+    "workspace_id": "workspace-uuid",
+    "surface_id": "surface-uuid",
+    "socket_path": "/path/to/cmux.sock",
+    "cli_path": "/opt/homebrew/bin/cmux",
+    "session_id": "abc-def-123"
+  }
+}
+```
+
+`panel_id` is accepted for cmux compatibility with older callers:
+
+```json
+{
+  "callback": {
+    "type": "cmux",
+    "workspace_id": "workspace-uuid",
+    "panel_id": "surface-uuid"
+  }
+}
+```
+
+WakeLite stores this as `surface_id`; downstream service code does not use `panel_id`.
 
 **Injected message format:**
 
@@ -217,7 +251,7 @@ This timer was created during your session. Act on the results above.
 
 **Auto-capture summary:**
 
-| Creation path | Has `$WEZTERM_PANE`? | Auto-capture works? |
+| Creation path | Has terminal env? | Auto-capture works? |
 |--------------|-------------------|-------------------|
 | CLI from Claude Code terminal | Yes | Yes |
 | MCP from Claude Code | Yes (inherited) | Yes |

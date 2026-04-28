@@ -133,17 +133,37 @@ class TimerStore:
             if not isinstance(callback, dict):
                 raise ValueError("callback must be an object")
             cb_type = callback.get("type")
-            if cb_type not in ("wezterm", "ghostty"):
-                raise ValueError("callback.type must be 'wezterm' or 'ghostty'")
-            pane_id = callback.get("pane_id")
-            if pane_id is not None and not isinstance(pane_id, int):
-                raise ValueError("callback.pane_id must be an integer")
-            terminal_id = callback.get("terminal_id")
-            if terminal_id is not None and not isinstance(terminal_id, str):
-                raise ValueError("callback.terminal_id must be a string")
-            session_id = callback.get("session_id")
-            if session_id is not None and not isinstance(session_id, str):
-                raise ValueError("callback.session_id must be a string")
+            if cb_type not in ("wezterm", "ghostty", "cmux"):
+                raise ValueError("callback.type must be 'wezterm', 'ghostty', or 'cmux'")
+            if cb_type == "cmux":
+                workspace_id = callback.get("workspace_id")
+                surface_id = callback.get("surface_id")
+                panel_id = callback.get("panel_id")
+                if not isinstance(workspace_id, str) or not workspace_id:
+                    raise ValueError("callback.workspace_id must be a non-empty string")
+                if surface_id is not None and not isinstance(surface_id, str):
+                    raise ValueError("callback.surface_id must be a string")
+                if panel_id is not None and not isinstance(panel_id, str):
+                    raise ValueError("callback.panel_id must be a string")
+                if not surface_id and panel_id:
+                    callback["surface_id"] = panel_id
+                callback.pop("panel_id", None)
+                if not isinstance(callback.get("surface_id"), str) or not callback.get("surface_id"):
+                    raise ValueError("callback.surface_id or callback.panel_id must be a non-empty string")
+                for field in ("socket_path", "cli_path", "session_id"):
+                    value = callback.get(field)
+                    if value is not None and not isinstance(value, str):
+                        raise ValueError(f"callback.{field} must be a string")
+            else:
+                pane_id = callback.get("pane_id")
+                if pane_id is not None and not isinstance(pane_id, int):
+                    raise ValueError("callback.pane_id must be an integer")
+                terminal_id = callback.get("terminal_id")
+                if terminal_id is not None and not isinstance(terminal_id, str):
+                    raise ValueError("callback.terminal_id must be a string")
+                session_id = callback.get("session_id")
+                if session_id is not None and not isinstance(session_id, str):
+                    raise ValueError("callback.session_id must be a string")
 
         active_hours = timer.get("recurrence", {}).get("active_hours")
         if active_hours:

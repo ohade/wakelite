@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 
 def _bootstrap(temp_home: str):
+    os.environ["HOME"] = temp_home
     os.environ["WAKELITE_HOME"] = temp_home
     import wakelite.config as config
     import wakelite.service as service
@@ -29,6 +30,10 @@ def _bootstrap(temp_home: str):
     def _patched_init(self, *a, **kw):
         _real_init(self, *a, **kw)
         self.notifier.notify_slack = unittest.mock.MagicMock(return_value="fake-ts-1234")
+        def _fake_daily_thread_ts():
+            self.notifier.notify_slack(":calendar: Timer activity")
+            return "fake-thread-ts"
+        self.notifier.get_daily_thread_ts = _fake_daily_thread_ts
 
     service.WakeLiteService.__init__ = _patched_init
 
@@ -973,6 +978,37 @@ def _ghostty_callback_timer(name: str, shell: str = "echo callback-ok",
     return t
 
 
+def _cmux_callback_timer(name: str, shell: str = "echo callback-ok",
+                         workspace_id: str = "ws-123", surface_id: str = "sf-456",
+                         session_id: str = "sess-cmux", cli_path: str = "/tmp/cmux"):
+    t = _basic_timer(name, shell)
+    t["callback"] = {
+        "type": "cmux",
+        "workspace_id": workspace_id,
+        "surface_id": surface_id,
+        "session_id": session_id,
+        "cli_path": cli_path,
+    }
+    return t
+
+
+def _make_executable(path: Path) -> str:
+    path.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _stdout_file(root: str, text: str = "cmux output") -> str:
+    path = Path(root) / "stdout.log"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _cmux_signal_files(home: str, session_id: str):
+    signal_dir = Path(home) / ".claude" / "session-signals"
+    return list(signal_dir.glob(f"{session_id}.*.wakelite-callback.json"))
+
+
 class CallbackTests(unittest.TestCase):
     """Tests for the WezTerm callback feature."""
 
@@ -1170,6 +1206,175 @@ class GhosttyCallbackTests(unittest.TestCase):
                 self.assertIn("run_id", data)
 
 
+class CmuxCallbackTests(unittest.TestCase):
+    """Tests for the cmux callback feature."""
+
+    def test_callback_schema_accepts_cmux(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = svc.timer_store.create_timer(
+                _cmux_callback_timer("cmux-valid", cli_path=cmux)
+            )
+            self.assertEqual(timer["callback"]["type"], "cmux")
+            self.assertEqual(timer["callback"]["workspace_id"], "ws-123")
+            self.assertEqual(timer["callback"]["surface_id"], "sf-456")
+
+    def test_callback_normalizes_panel_id_alias_to_surface_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            payload = _basic_timer("cmux-panel-alias")
+            payload["callback"] = {
+                "type": "cmux",
+                "workspace_id": "ws-alias",
+                "panel_id": "sf-alias",
+            }
+            timer = svc.timer_store.create_timer(payload)
+            self.assertEqual(timer["callback"]["surface_id"], "sf-alias")
+            self.assertNotIn("panel_id", timer["callback"])
+
+    def test_cmux_callback_calls_send_then_send_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer("cmux-send-order", cli_path=cmux)
+
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch("wakelite.service.time.sleep"):
+                mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+                svc._execute_callback(timer, "success", 0, "run-cmux-1", _stdout_file(td), 1.0)
+
+            calls = [call.args[0] for call in mock_run.call_args_list]
+            self.assertEqual(calls[0], [cmux, "send", "--workspace", "ws-123", "--surface", "sf-456", "--", "[WakeLite: cmux-send-order completed (success)]"])
+            self.assertEqual(calls[1], [cmux, "send-key", "--workspace", "ws-123", "--surface", "sf-456", "Enter"])
+
+    def test_cmux_callback_send_key_failure_preserves_signal_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer("cmux-partial", cli_path=cmux)
+
+            def side_effect(args, **kwargs):
+                if "send-key" in args:
+                    return unittest.mock.Mock(returncode=1, stdout="", stderr="key failed")
+                return unittest.mock.Mock(returncode=0, stdout="", stderr="")
+
+            with patch("wakelite.service.subprocess.run", side_effect=side_effect), \
+                 patch("wakelite.service.time.sleep"), \
+                 self.assertLogs("wakelite.service", level="WARNING") as logs:
+                svc._execute_callback(timer, "success", 0, "run-cmux-2", _stdout_file(td), 1.0)
+
+            self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+            self.assertIn("partial injection", "\n".join(logs.output))
+
+    def test_cmux_session_bound_skips_slack_start_thread(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = svc.timer_store.create_timer(
+                _cmux_callback_timer("cmux-session-bound", "echo ok", cli_path=cmux)
+            )
+
+            with patch("wakelite.service.subprocess.run") as mock_run, \
+                 patch.object(svc.notifier, "notify_slack") as mock_slack:
+                mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+                svc._schedule_occurrence(timer, "2026-04-27T10:00:00", is_catchup=False, queued_reason=None)
+                time.sleep(1.5)
+
+            started_calls = [
+                call for call in mock_slack.call_args_list
+                if call.args and "started" in call.args[0].lower()
+            ]
+            self.assertEqual(started_calls, [])
+
+    def test_cmux_stale_surface_falls_back_to_session_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer("cmux-store-fallback", cli_path=cmux)
+            store = Path(td) / "claude-hook-sessions.json"
+            lock = Path(td) / "claude-hook-sessions.lock"
+            store.write_text(json.dumps({
+                "sessions": [{
+                    "sessionId": "sess-cmux",
+                    "workspaceId": "ws-fresh",
+                    "surfaceId": "sf-fresh",
+                    "updatedAt": "2026-04-27T10:00:00Z",
+                }]
+            }), encoding="utf-8")
+            lock.write_text("", encoding="utf-8")
+
+            def side_effect(args, **kwargs):
+                if args[1] == "send" and args[3] == "ws-123":
+                    return unittest.mock.Mock(returncode=1, stdout="", stderr="surface not found")
+                return unittest.mock.Mock(returncode=0, stdout="", stderr="")
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": str(store),
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": str(lock),
+            }
+            with patch.dict(os.environ, env, clear=False), \
+                 patch("wakelite.service.subprocess.run", side_effect=side_effect) as mock_run, \
+                 patch("wakelite.service.time.sleep"):
+                svc._execute_callback(timer, "success", 0, "run-cmux-3", _stdout_file(td), 1.0)
+
+            send_calls = [call.args[0] for call in mock_run.call_args_list if call.args[0][1] == "send"]
+            self.assertEqual(send_calls[1][3], "ws-fresh")
+            self.assertEqual(send_calls[1][5], "sf-fresh")
+
+    def test_cmux_missing_cli_logs_error_keeps_signal_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            missing = str(Path(td) / "missing-cmux")
+            timer = _cmux_callback_timer("cmux-missing-cli", cli_path=missing)
+
+            with self.assertLogs("wakelite.service", level="ERROR") as logs:
+                svc._execute_callback(timer, "success", 0, "run-cmux-4", _stdout_file(td), 1.0)
+
+            self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+            self.assertIn("cmux CLI not found", "\n".join(logs.output))
+
+    def test_cmux_new_workspace_fallback_polls_for_tty_ready(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer("cmux-new-workspace", cli_path=cmux)
+
+            read_count = {"value": 0}
+
+            def side_effect(args, **kwargs):
+                command = args[1]
+                if command == "send" and "--surface" in args:
+                    return unittest.mock.Mock(returncode=1, stdout="", stderr="surface not found")
+                if command == "new-workspace":
+                    return unittest.mock.Mock(returncode=0, stdout="OK ws-new\n", stderr="")
+                if command == "read-screen":
+                    read_count["value"] += 1
+                    stdout = "$ " if read_count["value"] == 3 else ""
+                    return unittest.mock.Mock(returncode=0, stdout=stdout, stderr="")
+                return unittest.mock.Mock(returncode=0, stdout="", stderr="")
+
+            with patch("wakelite.service.subprocess.run", side_effect=side_effect) as mock_run, \
+                 patch("wakelite.service.time.sleep"):
+                svc._execute_callback(timer, "success", 0, "run-cmux-5", _stdout_file(td), 1.0)
+
+            calls = [call.args[0] for call in mock_run.call_args_list]
+            new_workspace = [args for args in calls if args[1] == "new-workspace"][0]
+            self.assertNotIn("--command", new_workspace)
+            read_calls = [args for args in calls if args[1] == "read-screen"]
+            self.assertEqual(len(read_calls), 3)
+            resume_send = [args for args in calls if args[1] == "send" and "--surface" not in args][-1]
+            self.assertEqual(resume_send, [cmux, "send", "--workspace", "ws-new", "--", "claude --resume sess-cmux\\n"])
+
+
 class AutoCaptureTerminalTests(unittest.TestCase):
     """Tests for the shared auto_capture_terminal helper."""
 
@@ -1207,6 +1412,28 @@ class AutoCaptureTerminalTests(unittest.TestCase):
         with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "env-id"}, clear=False):
             auto_capture_terminal(cb)
         self.assertEqual(cb["terminal_id"], "explicit-id")
+
+    def test_auto_capture_cmux_env(self):
+        from wakelite.config import auto_capture_terminal
+        with tempfile.TemporaryDirectory() as td:
+            cmux = _make_executable(Path(td) / "cmux")
+            cb = {}
+            env = {
+                "CMUX_WORKSPACE_ID": "ws-env",
+                "CMUX_SURFACE_ID": "sf-env",
+                "CMUX_PANEL_ID": "panel-env",
+                "CMUX_SOCKET_PATH": str(Path(td) / "cmux.sock"),
+                "CMUX_BUNDLED_CLI_PATH": cmux,
+                "GHOSTTY_TERMINAL_ID": "ghostty-env",
+                "WEZTERM_PANE": "99",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                auto_capture_terminal(cb)
+            self.assertEqual(cb["type"], "cmux")
+            self.assertEqual(cb["workspace_id"], "ws-env")
+            self.assertEqual(cb["surface_id"], "sf-env")
+            self.assertEqual(cb["socket_path"], str(Path(td) / "cmux.sock"))
+            self.assertEqual(cb["cli_path"], cmux)
 
 
 class CloneTimerTests(unittest.TestCase):

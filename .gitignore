@@ -6,3 +6,5 @@ __pycache__/
 node_modules/
 playwright-report/
 scripts/
+!wakelite/scripts/
+!wakelite/scripts/wakelite-rollback-cmux-timers.sh

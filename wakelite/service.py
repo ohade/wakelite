@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -850,7 +850,7 @@ class WakeLiteService:
             return
 
         try:
-            timer_name = timer.get("name", timer["id"])
+            timer_name = timer.get("name") or timer.get("id", "unknown")
             duration_str = self._format_duration(duration_seconds)
 
             # Read last 50 lines of stdout
@@ -875,12 +875,14 @@ class WakeLiteService:
             )
 
             cb_type = callback.get("type")
-            if cb_type in ("wezterm", "ghostty"):
+            if cb_type in ("wezterm", "ghostty", "cmux"):
                 # Write signal file for UserPromptSubmit hook to pick up
                 session_id = callback.get("session_id")
-                if session_id:
+                if session_id and cb_type != "cmux":
                     self._write_callback_signal(session_id, run_id, timer_name, status, exit_code, duration_str, stdout_tail)
-                if cb_type == "ghostty":
+                if cb_type == "cmux":
+                    self._cmux_callback(timer, run_id, status, exit_code, duration_str, stdout_tail, callback)
+                elif cb_type == "ghostty":
                     self._ghostty_callback(callback, message, timer, timer_name, status, slack_thread_ts=slack_thread_ts)
                 else:
                     self._wezterm_callback(callback, message, timer, timer_name, status, slack_thread_ts=slack_thread_ts)
@@ -929,6 +931,342 @@ class WakeLiteService:
         }
         signal_file.write_text(json.dumps(signal_data, indent=2))
         logger.info("Wrote callback signal file: %s", signal_file)
+
+    # ── cmux callback ─────────────────────────────────────────────────
+
+    def _cmux_callback(
+        self,
+        timer: Dict[str, Any],
+        run_id: str,
+        status: str,
+        exit_code: Optional[int],
+        duration: str,
+        stdout_tail: str,
+        callback: Dict[str, Any],
+    ) -> None:
+        """Send a short trigger to a cmux surface.
+
+        The full callback payload lives in the terminal-neutral signal file.
+        If terminal injection is missing or partial, the signal file is left in
+        place so the next prompt or a manual retrigger can still consume it.
+        """
+        timer_id = timer.get("id", "unknown")
+        timer_name = timer.get("name", timer_id)
+        session_id = callback.get("session_id")
+
+        message = (
+            f'[WakeLite callback] Timer "{timer_name}" completed\n'
+            f"Status: {status} | Exit code: {exit_code} | Duration: {duration}\n"
+            f"Stdout (last 50 lines):\n"
+            f"{'─' * 25}\n"
+            f"{stdout_tail}\n"
+            f"{'─' * 25}\n"
+            f"This timer was created during your session. Act on the results above."
+        )
+
+        if session_id:
+            self._write_callback_signal(session_id, run_id, timer_name, status, exit_code, duration, stdout_tail)
+            trigger = f"[WakeLite: {timer_name} completed ({status})]"
+        else:
+            trigger = message
+
+        cli_path = self._resolve_cmux_cli_path(callback)
+        if not cli_path:
+            logger.error("cmux callback failed for timer %s: cmux CLI not found or not executable", timer_id)
+            return
+
+        workspace_id = callback.get("workspace_id")
+        surface_id = callback.get("surface_id")
+        if not workspace_id or not surface_id:
+            logger.error(
+                "cmux callback failed for timer %s: missing workspace_id or surface_id",
+                timer_id,
+            )
+            return
+
+        env = self._cmux_env(callback)
+        delivery = self._cmux_deliver_trigger(cli_path, env, workspace_id, surface_id, trigger, timer_id)
+        if delivery in ("delivered", "partial"):
+            return
+        if delivery != "stale":
+            return
+
+        if not session_id:
+            logger.error(
+                "cmux callback target is stale for timer %s and no session_id is available for fallback",
+                timer_id,
+            )
+            return
+
+        resolved = self._resolve_cmux_target_via_session_store(session_id)
+        if resolved:
+            resolved_workspace, resolved_surface = resolved
+            delivery = self._cmux_deliver_trigger(
+                cli_path,
+                env,
+                resolved_workspace,
+                resolved_surface,
+                trigger,
+                timer_id,
+            )
+            if delivery in ("delivered", "partial"):
+                return
+            if delivery != "stale":
+                return
+
+        self._cmux_new_workspace_fallback(cli_path, env, timer, session_id)
+
+    @staticmethod
+    def _cmux_env(callback: Dict[str, Any]) -> Dict[str, str]:
+        env = os.environ.copy()
+        socket_path = callback.get("socket_path")
+        if socket_path:
+            env["CMUX_SOCKET_PATH"] = socket_path
+        return env
+
+    @staticmethod
+    def _resolve_cmux_cli_path(callback: Dict[str, Any]) -> Optional[str]:
+        explicit = callback.get("cli_path")
+        if explicit:
+            if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+                return explicit
+            return None
+
+        for candidate in (
+            os.environ.get("CMUX_BUNDLED_CLI_PATH"),
+            "/opt/homebrew/bin/cmux",
+            "/usr/local/bin/cmux",
+            "/Applications/cmux.app/Contents/Resources/bin/cmux",
+        ):
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    @staticmethod
+    def _cmux_result_text(result: subprocess.CompletedProcess[Any]) -> str:
+        return f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+
+    @classmethod
+    def _cmux_surface_not_found(cls, result: subprocess.CompletedProcess[Any]) -> bool:
+        if result.returncode == 0:
+            return False
+        text = cls._cmux_result_text(result).lower()
+        return "surface" in text and (
+            "not found" in text
+            or "missing" in text
+            or "unknown" in text
+            or "invalid" in text
+            or "gone" in text
+        )
+
+    @staticmethod
+    def _cmux_run(cli_path: str, args: List[str], env: Dict[str, str], timeout: int = 5) -> Optional[subprocess.CompletedProcess[Any]]:
+        try:
+            return subprocess.run(
+                [cli_path, *args],
+                timeout=timeout,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        except Exception as exc:
+            logger.error("cmux command failed (%s %s): %s", cli_path, " ".join(args[:2]), exc)
+            return None
+
+    def _cmux_deliver_trigger(
+        self,
+        cli_path: str,
+        env: Dict[str, str],
+        workspace_id: str,
+        surface_id: str,
+        trigger: str,
+        timer_id: str,
+    ) -> str:
+        send_result = self._cmux_run(
+            cli_path,
+            ["send", "--workspace", workspace_id, "--surface", surface_id, "--", trigger],
+            env,
+        )
+        if send_result is None:
+            return "failed"
+        if send_result.returncode != 0:
+            if self._cmux_surface_not_found(send_result):
+                logger.warning(
+                    "cmux callback target is stale for timer %s: %s",
+                    timer_id,
+                    self._cmux_result_text(send_result),
+                )
+                return "stale"
+            logger.error(
+                "cmux send failed for timer %s: %s",
+                timer_id,
+                self._cmux_result_text(send_result),
+            )
+            return "failed"
+
+        enter_result: Optional[subprocess.CompletedProcess[Any]] = None
+        for attempt in range(3):
+            enter_result = self._cmux_run(
+                cli_path,
+                ["send-key", "--workspace", workspace_id, "--surface", surface_id, "Enter"],
+                env,
+            )
+            if enter_result is not None and enter_result.returncode == 0:
+                logger.info(
+                    "cmux callback delivered to workspace %s surface %s for timer %s",
+                    workspace_id,
+                    surface_id,
+                    timer_id,
+                )
+                return "delivered"
+            time.sleep(1.0 * (attempt + 1))
+
+        detail = self._cmux_result_text(enter_result) if enter_result is not None else "send-key did not run"
+        logger.warning(
+            "cmux partial injection for timer %s: cmux send succeeded but send-key Enter failed: %s",
+            timer_id,
+            detail,
+        )
+        return "partial"
+
+    def _resolve_cmux_target_via_session_store(self, session_id: str) -> Optional[Tuple[str, str]]:
+        store_override = os.environ.get("WAKELITE_CMUX_SESSION_STORE_PATH")
+        if store_override:
+            store_path = Path(store_override).expanduser()
+            lock_path = Path(
+                os.environ.get(
+                    "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH",
+                    str(store_path.with_name("claude-hook-sessions.lock")),
+                )
+            ).expanduser()
+        else:
+            cmux_dir = Path.home() / ".cmuxterm"
+            store_path = cmux_dir / "claude-hook-sessions.json"
+            lock_path = cmux_dir / "claude-hook-sessions.lock"
+
+        if not store_path.exists() or not lock_path.exists():
+            return None
+
+        try:
+            import fcntl
+
+            with lock_path.open("r", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    logger.info("cmux session store is locked; treating as cache miss")
+                    return None
+                try:
+                    raw = store_path.read_text(encoding="utf-8")
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            logger.info("Unable to read cmux session store; treating as cache miss", exc_info=True)
+            return None
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.info("Unable to parse cmux session store; treating as cache miss")
+            return None
+
+        if isinstance(parsed, dict):
+            sessions = parsed.get("sessions", [])
+        elif isinstance(parsed, list):
+            sessions = parsed
+        else:
+            sessions = []
+
+        matches = [
+            entry for entry in sessions
+            if isinstance(entry, dict)
+            and entry.get("sessionId") == session_id
+            and isinstance(entry.get("workspaceId"), str)
+            and isinstance(entry.get("surfaceId"), str)
+        ]
+        if not matches:
+            return None
+
+        matches.sort(key=lambda entry: str(entry.get("updatedAt", "")))
+        freshest = matches[-1]
+        return freshest["workspaceId"], freshest["surfaceId"]
+
+    @staticmethod
+    def _cmux_workspace_id_from_new_workspace(result: subprocess.CompletedProcess[Any]) -> Optional[str]:
+        output = (result.stdout or "").strip()
+        if not output:
+            return None
+        last_line = output.splitlines()[-1].strip()
+        parts = last_line.split()
+        if len(parts) >= 2 and parts[0] == "OK":
+            return parts[1]
+        return parts[-1] if parts else None
+
+    @staticmethod
+    def _cmux_screen_ready(text: str) -> bool:
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return False
+        last = lines[-1]
+        prompt_markers = ("$", "%", "#", ">", "❯", "➜")
+        return any(last.endswith(marker) for marker in prompt_markers)
+
+    def _cmux_new_workspace_fallback(
+        self,
+        cli_path: str,
+        env: Dict[str, str],
+        timer: Dict[str, Any],
+        session_id: str,
+    ) -> None:
+        timer_id = timer.get("id", "unknown")
+        timer_name = timer.get("name", timer_id)
+        cwd = timer.get("command", {}).get("workingDirectory") or str(Path.home())
+        result = self._cmux_run(
+            cli_path,
+            ["new-workspace", "--name", f"WakeLite: {timer_name}", "--cwd", cwd],
+            env,
+            timeout=10,
+        )
+        if result is None:
+            return
+        if result.returncode != 0:
+            logger.error("cmux new-workspace fallback failed for timer %s: %s", timer_id, self._cmux_result_text(result))
+            return
+
+        workspace_id = self._cmux_workspace_id_from_new_workspace(result)
+        if not workspace_id:
+            logger.error("cmux new-workspace fallback returned no workspace id for timer %s", timer_id)
+            return
+
+        ready = False
+        for attempt in range(10):
+            screen = self._cmux_run(
+                cli_path,
+                ["read-screen", "--workspace", workspace_id, "--lines", "5"],
+                env,
+            )
+            if screen is not None and screen.returncode == 0 and self._cmux_screen_ready(screen.stdout or ""):
+                ready = True
+                break
+            time.sleep(1.0)
+
+        if not ready:
+            logger.warning(
+                "cmux new-workspace fallback did not reach a prompt for timer %s; signal file preserved",
+                timer_id,
+            )
+            return
+
+        resume = f"claude --resume {shlex.quote(session_id)}\\n"
+        send_resume = self._cmux_run(
+            cli_path,
+            ["send", "--workspace", workspace_id, "--", resume],
+            env,
+        )
+        if send_resume is None or send_resume.returncode != 0:
+            detail = self._cmux_result_text(send_resume) if send_resume is not None else "send did not run"
+            logger.error("cmux resume send failed for timer %s: %s", timer_id, detail)
 
     def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
                           timer_name: str = "", status: str = "",
@@ -1185,7 +1523,7 @@ end tell'''],
         # so all notifications for this run are grouped under one parent.
         slack_thread_ts: Optional[str] = None
         callback = timer.get("callback") or {}
-        session_bound = callback.get("type") in ("wezterm", "ghostty") and bool(callback.get("session_id"))
+        session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
         if not session_bound:
             timer_name = timer.get("name", timer_id)
             slack_thread_ts = self.notifier.get_daily_thread_ts()
