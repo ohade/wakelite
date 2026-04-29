@@ -1258,7 +1258,12 @@ class WakeLiteService:
             )
             return
 
-        resume = f"claude --resume {shlex.quote(session_id)}\\n"
+        # CC-95: type the resume command via argv (no shell, so shlex.quote is unnecessary
+        # and would inject literal quote chars). Submit it with an explicit `send-key Enter`
+        # — `cmux send` does not interpret \n / \r as Enter, so a trailing escape leaves the
+        # command sitting at the prompt unsubmitted. Match the 3x backoff in
+        # _cmux_deliver_trigger so transient send-key failures don't strand the resume.
+        resume = f"claude --resume {session_id}"
         send_resume = self._cmux_run(
             cli_path,
             ["send", "--workspace", workspace_id, "--", resume],
@@ -1267,6 +1272,30 @@ class WakeLiteService:
         if send_resume is None or send_resume.returncode != 0:
             detail = self._cmux_result_text(send_resume) if send_resume is not None else "send did not run"
             logger.error("cmux resume send failed for timer %s: %s", timer_id, detail)
+            return
+
+        enter_result: Optional[subprocess.CompletedProcess[Any]] = None
+        for attempt in range(3):
+            enter_result = self._cmux_run(
+                cli_path,
+                ["send-key", "--workspace", workspace_id, "Enter"],
+                env,
+            )
+            if enter_result is not None and enter_result.returncode == 0:
+                logger.info(
+                    "cmux new-workspace fallback delivered claude --resume to workspace %s for timer %s",
+                    workspace_id,
+                    timer_id,
+                )
+                return
+            time.sleep(1.0 * (attempt + 1))
+
+        detail = self._cmux_result_text(enter_result) if enter_result is not None else "send-key did not run"
+        logger.warning(
+            "cmux new-workspace fallback partial-injection for timer %s: send succeeded but send-key Enter failed: %s",
+            timer_id,
+            detail,
+        )
 
     def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
                           timer_name: str = "", status: str = "",

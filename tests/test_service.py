@@ -1360,6 +1360,7 @@ class CmuxCallbackTests(unittest.TestCase):
                     read_count["value"] += 1
                     stdout = "$ " if read_count["value"] == 3 else ""
                     return unittest.mock.Mock(returncode=0, stdout=stdout, stderr="")
+                # send-key Enter for the new-workspace fallback (workspace-only, no --surface)
                 return unittest.mock.Mock(returncode=0, stdout="", stderr="")
 
             with patch("wakelite.service.subprocess.run", side_effect=side_effect) as mock_run, \
@@ -1371,8 +1372,14 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertNotIn("--command", new_workspace)
             read_calls = [args for args in calls if args[1] == "read-screen"]
             self.assertEqual(len(read_calls), 3)
+            # CC-95: resume must be sent in TWO argv calls — the command (no trailing escape)
+            # followed by a separate send-key Enter. cmux send does not interpret \n / \r as
+            # Enter, so a trailing escape leaves the command unsubmitted.
             resume_send = [args for args in calls if args[1] == "send" and "--surface" not in args][-1]
-            self.assertEqual(resume_send, [cmux, "send", "--workspace", "ws-new", "--", "claude --resume sess-cmux\\n"])
+            self.assertEqual(resume_send, [cmux, "send", "--workspace", "ws-new", "--", "claude --resume sess-cmux"])
+            send_key_calls = [args for args in calls if args[1] == "send-key" and "--surface" not in args]
+            self.assertTrue(send_key_calls, "expected a workspace-scoped send-key Enter after resume send")
+            self.assertEqual(send_key_calls[0], [cmux, "send-key", "--workspace", "ws-new", "Enter"])
 
 
 class AutoCaptureTerminalTests(unittest.TestCase):
