@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -10,11 +11,15 @@ from .recurrence import parse_recurrence, parse_time, RecurrenceError
 from .utils import atomic_write_json, read_json
 
 
+logger = logging.getLogger(__name__)
+
+
 ALLOWED_PAYLOAD_KEYS = {"name", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "comment", "id", "timer_type", "execution", "resources", "max_runs", "until", "callback"}
 ALLOWED_WAKE_KEYS = {"enabled", "action", "leadMinutes"}
 ALLOWED_EXECUTION_KEYS = {"overlap", "max_concurrent", "restart_on_failure", "restart_delay_seconds", "restart_max_backoff_seconds"}
 ALLOWED_OVERLAP_VALUES = {"skip", "queue", "allow"}
 ALLOWED_RESOURCE_KEYS = {"name", "description", "capacity", "estimated_usage"}
+ALLOWED_CALLBACK_TYPES = ("wezterm", "ghostty", "cmux")
 
 
 class TimerStore:
@@ -133,9 +138,24 @@ class TimerStore:
             if not isinstance(callback, dict):
                 raise ValueError("callback must be an object")
             cb_type = callback.get("type")
-            if cb_type not in ("wezterm", "ghostty", "cmux"):
-                raise ValueError("callback.type must be 'wezterm', 'ghostty', or 'cmux'")
-            if cb_type == "cmux":
+            if cb_type not in ALLOWED_CALLBACK_TYPES:
+                # CC-95: rolling-deploy compat. A timer persisted by a newer
+                # WakeLite version may carry a callback type the running version
+                # doesn't recognize (e.g., "kitty" lands in vN+1, vN gets rolled
+                # back). Hard-rejecting here breaks update_timer / replace_all
+                # on existing timers and bricks the rollback. Neutralize the
+                # callback instead — the timer keeps running, just without
+                # terminal injection — and warn loudly so the operator sees it.
+                logger.warning(
+                    "Unknown callback.type=%r on timer %r — neutralizing callback "
+                    "for rolling-deploy compatibility. Allowed types: %s. "
+                    "The timer will run without terminal callback.",
+                    cb_type,
+                    timer.get("name", "<unnamed>"),
+                    ", ".join(ALLOWED_CALLBACK_TYPES),
+                )
+                timer["callback"] = None
+            elif cb_type == "cmux":
                 workspace_id = callback.get("workspace_id")
                 surface_id = callback.get("surface_id")
                 panel_id = callback.get("panel_id")

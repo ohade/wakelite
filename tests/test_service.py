@@ -1381,6 +1381,42 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertTrue(send_key_calls, "expected a workspace-scoped send-key Enter after resume send")
             self.assertEqual(send_key_calls[0], [cmux, "send-key", "--workspace", "ws-new", "Enter"])
 
+    def test_unknown_callback_type_is_neutralized_with_warning(self):
+        """CC-95: rolling-deploy compat. A timer with an unknown callback.type
+        (e.g., a hypothetical future "kitty" written by a newer WakeLite) must
+        be accepted by an older version's _validate_timer — the callback is
+        neutralized to None and a WARNING is logged. Without this, rolling
+        back to an older version after newer-version writes would brick
+        update_timer / replace_all on every affected timer."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            payload = _basic_timer("future-callback-type")
+            payload["callback"] = {
+                "type": "kitty",
+                "workspace_id": "ws-future",
+                "surface_id": "sf-future",
+            }
+
+            with self.assertLogs("wakelite.timer_store", level="WARNING") as logs:
+                timer = svc.timer_store.create_timer(payload)
+
+            self.assertIsNone(timer["callback"], "callback should be neutralized to None")
+            log_text = "\n".join(logs.output)
+            self.assertIn("kitty", log_text)
+            self.assertIn("future-callback-type", log_text)
+            self.assertIn("neutralizing", log_text.lower())
+
+            # update_timer must also tolerate the unknown type — this is the
+            # rolling-deploy hot path: an older version trying to toggle
+            # `enabled` on a timer whose persisted callback it doesn't know.
+            persisted = dict(timer)
+            persisted["callback"] = {"type": "kitty", "workspace_id": "ws-still"}
+            with self.assertLogs("wakelite.timer_store", level="WARNING"):
+                updated = svc.timer_store.update_timer(timer["id"], {"callback": persisted["callback"]})
+            self.assertIsNone(updated["callback"])
+
 
 class AutoCaptureTerminalTests(unittest.TestCase):
     """Tests for the shared auto_capture_terminal helper."""
