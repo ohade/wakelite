@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1046,18 +1046,60 @@ class WakeLiteService:
     def _cmux_result_text(result: subprocess.CompletedProcess[Any]) -> str:
         return f"{result.stdout or ''}\n{result.stderr or ''}".strip()
 
+    # CC-95: canonical stale-target phrases from cmux's own
+    # `shouldIgnoreClaudeHookTeardownError` allowlist (cmux.swift:12755-12772).
+    # These are the exact lowercased substrings cmux emits on stderr when a
+    # workspace/surface/panel id no longer resolves. Subset chosen for
+    # WakeLite's "did the callback target go stale?" question — socket-level
+    # errors ("failed to write to socket", "socket read error", "not connected")
+    # are excluded because they're infrastructure faults, not stale handles,
+    # and WakeLite should retry/log-error on those rather than fall back to
+    # new-workspace.
+    _CMUX_STALE_TARGET_PHRASES: ClassVar[Tuple[str, ...]] = (
+        "workspace not found",
+        "workspace ref not found",
+        "workspace index not found",
+        "workspace target not found",
+        "previous workspace not found",
+        "surface not found",
+        "surface ref not found",
+        "surface index not found",
+        "surface target not found",
+        "unable to resolve surface id",
+        "panel not found",
+        "tab not found",
+        "no workspace selected",
+        "tabmanager not available",
+    )
+
     @classmethod
     def _cmux_surface_not_found(cls, result: subprocess.CompletedProcess[Any]) -> bool:
+        """Return True iff cmux's stderr indicates a stale workspace/surface
+        handle. CC-95: replaced the prior fragile substring match
+        (`"surface" in text AND any-of("not found"|"missing"|"unknown"|...)`)
+        with an anchored allowlist of cmux's canonical phrases. The previous
+        check produced false positives on phrasings like "Network unknown
+        error on surface init" and false negatives on cmux's actual messages
+        like "Workspace target not found" (no "surface" token). When stderr
+        is non-zero but no canonical phrase matches, we log a WARNING so an
+        unrecognized stale-target wording surfaces in the runner log instead
+        of being silently classified as a generic failure."""
         if result.returncode == 0:
             return False
         text = cls._cmux_result_text(result).lower()
-        return "surface" in text and (
-            "not found" in text
-            or "missing" in text
-            or "unknown" in text
-            or "invalid" in text
-            or "gone" in text
-        )
+        for phrase in cls._CMUX_STALE_TARGET_PHRASES:
+            if phrase in text:
+                return True
+        # Non-zero exit, but stderr doesn't match any known stale-target
+        # phrase. Could be a real send/transport failure OR a stale-target
+        # phrasing we haven't seen yet. Log so the operator can extend the
+        # allowlist if it's the latter.
+        if text:
+            logger.warning(
+                "cmux non-zero exit with unrecognized stderr (not classified as stale-target): %s",
+                text,
+            )
+        return False
 
     @staticmethod
     def _cmux_run(cli_path: str, args: List[str], env: Dict[str, str], timeout: int = 5) -> Optional[subprocess.CompletedProcess[Any]]:

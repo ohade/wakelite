@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -1416,6 +1417,111 @@ class CmuxCallbackTests(unittest.TestCase):
             with self.assertLogs("wakelite.timer_store", level="WARNING"):
                 updated = svc.timer_store.update_timer(timer["id"], {"callback": persisted["callback"]})
             self.assertIsNone(updated["callback"])
+
+
+class CmuxSurfaceNotFoundContractTests(unittest.TestCase):
+    """CC-95: contract tests for `_cmux_surface_not_found`. The classifier
+    decides whether a non-zero `cmux send` invocation indicates a stale
+    workspace/surface (→ fall back to session-store / new-workspace) or a
+    real send failure (→ log error + give up). The canonical phrases come
+    from cmux's own `shouldIgnoreClaudeHookTeardownError` allowlist
+    (cmux.swift:12755-12772). Pre-CC-95 the classifier substring-matched
+    `"surface" AND ("not found"|"missing"|"unknown"|"invalid"|"gone")` —
+    "missing/unknown/invalid/gone" never appear in cmux output and the
+    "unknown" branch false-matched on unrelated errors like "Network
+    unknown error". This suite locks the new behavior to cmux's real
+    wording."""
+
+    @staticmethod
+    def _result(stderr: str, returncode: int = 1) -> subprocess.CompletedProcess:
+        # cmux writes errors to stderr with returncode != 0; stdout is
+        # generally empty for these.
+        return subprocess.CompletedProcess(
+            args=["cmux", "send"], returncode=returncode, stdout="", stderr=stderr
+        )
+
+    def test_returncode_zero_is_never_stale(self):
+        from wakelite.service import WakeLiteService
+        # Even if stderr would otherwise match (e.g., warning text), exit 0
+        # means the call succeeded — never reclassify as stale.
+        result = self._result("Surface not found", returncode=0)
+        self.assertFalse(WakeLiteService._cmux_surface_not_found(result))
+
+    def test_canonical_cmux_phrases_classify_as_stale(self):
+        from wakelite.service import WakeLiteService
+        # Mirror cmux.swift:12755-12772 — the relevant subset (stale handles,
+        # not socket/transport faults). Each is the actual user-visible
+        # wording from cmux's own ignore list, with the leading capital.
+        canonical = [
+            "Workspace not found",
+            "Workspace ref not found",
+            "Workspace index not found",
+            "Workspace target not found: ws-stale",
+            "Previous workspace not found",
+            "Surface not found",
+            "Surface ref not found",
+            "Surface index not found",
+            "Surface target not found",
+            "Unable to resolve surface id",
+            "Panel not found",
+            "Tab not found",
+            "No workspace selected",
+            "TabManager not available",
+        ]
+        for stderr in canonical:
+            with self.subTest(stderr=stderr):
+                self.assertTrue(
+                    WakeLiteService._cmux_surface_not_found(self._result(stderr)),
+                    f"expected stale classification for cmux stderr: {stderr!r}",
+                )
+
+    def test_socket_and_transport_errors_are_not_classified_as_stale(self):
+        from wakelite.service import WakeLiteService
+        # These appear in cmux's broader ignore list but are infra faults,
+        # not stale handles. WakeLite should NOT treat them as stale (they
+        # warrant retry / hard-error, not new-workspace fallback).
+        for stderr in (
+            "failed to write to socket",
+            "socket read error",
+            "not connected",
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertFalse(
+                    WakeLiteService._cmux_surface_not_found(self._result(stderr)),
+                    f"socket-level error misclassified as stale: {stderr!r}",
+                )
+
+    def test_pre_cc95_false_positive_no_longer_classifies_as_stale(self):
+        from wakelite.service import WakeLiteService
+        # Pre-CC-95 substring check matched `"surface" AND "unknown"`, so a
+        # message like this falsely classified as stale. The anchored phrase
+        # check rejects it.
+        result = self._result("Network unknown error on surface init")
+        self.assertFalse(WakeLiteService._cmux_surface_not_found(result))
+
+    def test_unrecognized_nonzero_exit_logs_warning_and_returns_false(self):
+        from wakelite.service import WakeLiteService
+        # When a non-zero exit produces stderr we don't recognize, log a
+        # WARNING (so the operator can extend the allowlist if it's a new
+        # stale-target phrasing) and return False (don't speculatively fall
+        # back).
+        result = self._result("Permission denied: keychain")
+        with self.assertLogs("wakelite.service", level="WARNING") as logs:
+            classified = WakeLiteService._cmux_surface_not_found(result)
+        self.assertFalse(classified)
+        log_text = "\n".join(logs.output)
+        self.assertIn("permission denied: keychain", log_text.lower())
+        self.assertIn("not classified as stale", log_text.lower())
+
+    def test_empty_stderr_with_nonzero_exit_does_not_log_or_classify(self):
+        from wakelite.service import WakeLiteService
+        # cmux killed by signal, hung up, etc. — nothing to log, definitely
+        # not a stale-target classification.
+        result = self._result("")
+        # `assertLogs` raises if nothing is logged at the requested level,
+        # so we verify quietness via a direct check on the captured handler.
+        with self.assertNoLogs("wakelite.service", level="WARNING"):
+            self.assertFalse(WakeLiteService._cmux_surface_not_found(result))
 
 
 class AutoCaptureTerminalTests(unittest.TestCase):
