@@ -7,6 +7,7 @@ import time
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import Tuple
 from unittest.mock import patch
 
 
@@ -1301,12 +1302,19 @@ class CmuxCallbackTests(unittest.TestCase):
             timer = _cmux_callback_timer("cmux-store-fallback", cli_path=cmux)
             store = Path(td) / "claude-hook-sessions.json"
             lock = Path(td) / "claude-hook-sessions.lock"
+            # CC-95 (HIGH#3): session-store entries are filtered against a
+            # 24h cutoff. Use a relative timestamp so the test stays green
+            # regardless of the wall clock at run time — a hardcoded
+            # absolute date would pass on the day it's written and fail
+            # one day later.
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            recent_iso = (_dt.now(_tz.utc) - _td(minutes=5)).isoformat()
             store.write_text(json.dumps({
                 "sessions": [{
                     "sessionId": "sess-cmux",
                     "workspaceId": "ws-fresh",
                     "surfaceId": "sf-fresh",
-                    "updatedAt": "2026-04-27T10:00:00Z",
+                    "updatedAt": recent_iso,
                 }]
             }), encoding="utf-8")
             lock.write_text("", encoding="utf-8")
@@ -1522,6 +1530,148 @@ class CmuxSurfaceNotFoundContractTests(unittest.TestCase):
         # so we verify quietness via a direct check on the captured handler.
         with self.assertNoLogs("wakelite.service", level="WARNING"):
             self.assertFalse(WakeLiteService._cmux_surface_not_found(result))
+
+
+class CmuxSessionStoreOrderingTests(unittest.TestCase):
+    """CC-95: ordering and freshness guarantees for the cmux session-store
+    fallback. Pre-CC-95 the resolver lex-sorted `updatedAt` strings, which
+    (a) misorders mixed timezone formats — `+00:00` < `Z` lexically though
+    they're the same instant — and (b) imposed no staleness cutoff, so a
+    7-day-old entry could win over a stale-but-recent surface that just
+    churned. Now: parse with `datetime.fromisoformat`, drop entries older
+    than 24h, INFO-log the chosen entry's age."""
+
+    @staticmethod
+    def _setup_store(td: str, sessions: list) -> Tuple[Path, Path]:
+        store = Path(td) / "claude-hook-sessions.json"
+        lock = Path(td) / "claude-hook-sessions.lock"
+        store.write_text(json.dumps({"sessions": sessions}), encoding="utf-8")
+        lock.write_text("", encoding="utf-8")
+        return store, lock
+
+    def test_datetime_ordering_picks_latest_instant_across_tz_formats(self):
+        """Two entries for the same session — one written `...+00:00`, the
+        other `...Z` ten seconds later. Lex-sort would put `+00:00` last
+        (because `+` < `Z` lexically). Datetime parsing collapses both to
+        UTC and the actually-newer `Z` entry wins."""
+        with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = _dt.now(_tz.utc)
+            older_plus00 = (now - _td(seconds=10)).isoformat(timespec="seconds")  # `...+00:00`
+            newer_z = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            store, lock = self._setup_store(td, [
+                {
+                    "sessionId": "sess-tz",
+                    "workspaceId": "ws-older-plus00",
+                    "surfaceId": "sf-older-plus00",
+                    "updatedAt": older_plus00,
+                },
+                {
+                    "sessionId": "sess-tz",
+                    "workspaceId": "ws-newer-z",
+                    "surfaceId": "sf-newer-z",
+                    "updatedAt": newer_z,
+                },
+            ])
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": str(store),
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": str(lock),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                target = svc._resolve_cmux_target_via_session_store("sess-tz")
+
+            self.assertEqual(target, ("ws-newer-z", "sf-newer-z"))
+
+    def test_skips_entries_older_than_24h_cutoff(self):
+        """The single matching entry is 25h old. The resolver returns None
+        rather than routing to a near-certainly-closed session, and logs
+        why."""
+        with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            stale_iso = (_dt.now(_tz.utc) - _td(hours=25)).isoformat()
+            store, lock = self._setup_store(td, [{
+                "sessionId": "sess-stale",
+                "workspaceId": "ws-stale",
+                "surfaceId": "sf-stale",
+                "updatedAt": stale_iso,
+            }])
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": str(store),
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": str(lock),
+            }
+            with patch.dict(os.environ, env, clear=False), \
+                 self.assertLogs("wakelite.service", level="INFO") as logs:
+                target = svc._resolve_cmux_target_via_session_store("sess-stale")
+
+            self.assertIsNone(target)
+            self.assertIn("no fresh entry", "\n".join(logs.output).lower())
+            self.assertIn("24h", "\n".join(logs.output))
+
+    def test_route_logs_age_in_seconds(self):
+        """When a fresh entry is routed, log includes `age=Ns` so operators
+        can see how stale the chosen target was without having to inspect
+        the session store."""
+        with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            ten_min_ago = (_dt.now(_tz.utc) - _td(minutes=10)).isoformat()
+            store, lock = self._setup_store(td, [{
+                "sessionId": "sess-age",
+                "workspaceId": "ws-aged",
+                "surfaceId": "sf-aged",
+                "updatedAt": ten_min_ago,
+            }])
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": str(store),
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": str(lock),
+            }
+            with patch.dict(os.environ, env, clear=False), \
+                 self.assertLogs("wakelite.service", level="INFO") as logs:
+                target = svc._resolve_cmux_target_via_session_store("sess-age")
+
+            self.assertEqual(target, ("ws-aged", "sf-aged"))
+            log_text = "\n".join(logs.output)
+            # 10 minutes = 600s, allow a small slack for test wall-clock drift.
+            self.assertRegex(log_text, r"age=(59[0-9]|60[0-9])s")
+
+    def test_naive_timestamp_is_treated_as_utc_not_skipped(self):
+        """An older session-store entry that lacks tzinfo (`...T10:00:00`
+        with no `Z` / offset) is treated as UTC rather than dropped — cmux
+        always emits UTC and silently failing on naive timestamps would
+        produce mysterious "no fresh entry" misses if a future cmux build
+        ever drops the suffix."""
+        with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            naive_iso = (_dt.now(_tz.utc) - _td(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+            store, lock = self._setup_store(td, [{
+                "sessionId": "sess-naive",
+                "workspaceId": "ws-naive",
+                "surfaceId": "sf-naive",
+                "updatedAt": naive_iso,
+            }])
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": str(store),
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": str(lock),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                target = svc._resolve_cmux_target_via_session_store("sess-naive")
+
+            self.assertEqual(target, ("ws-naive", "sf-naive"))
 
 
 class AutoCaptureTerminalTests(unittest.TestCase):

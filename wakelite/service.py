@@ -1230,9 +1230,64 @@ class WakeLiteService:
         if not matches:
             return None
 
-        matches.sort(key=lambda entry: str(entry.get("updatedAt", "")))
-        freshest = matches[-1]
+        # CC-95: parse `updatedAt` as datetime instead of lex-sorting strings.
+        # Lex-sort breaks on mixed timezone formats — the same instant
+        # serialized as `...+00:00` lex-orders earlier than `...Z` because
+        # `+` (0x2B) < `Z` (0x5A). Datetime parsing collapses these to the
+        # same instant. Also enforce a 24h freshness cutoff so a long-stale
+        # entry that happens to be the lex-greatest doesn't win — past 24h
+        # we'd rather fall through to new-workspace than route to a session
+        # the user has almost certainly closed. cmux's own session store
+        # auto-prunes after 7 days (cmux.swift:339), so 24h is well inside
+        # the data lifecycle.
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=24)
+        dated: List[Tuple[datetime, Dict[str, Any]]] = []
+        for entry in matches:
+            updated_at = self._parse_session_updated_at(entry.get("updatedAt"))
+            if updated_at is None:
+                continue
+            if updated_at < cutoff:
+                continue
+            dated.append((updated_at, entry))
+
+        if not dated:
+            logger.info(
+                "cmux session store has no fresh entry for session %s within 24h cutoff",
+                session_id,
+            )
+            return None
+
+        dated.sort(key=lambda x: x[0])
+        updated_at, freshest = dated[-1]
+        age_seconds = max(0, int((now - updated_at).total_seconds()))
+        logger.info(
+            "cmux session store routed session %s to workspace=%s surface=%s (age=%ds)",
+            session_id,
+            freshest["workspaceId"],
+            freshest["surfaceId"],
+            age_seconds,
+        )
         return freshest["workspaceId"], freshest["surfaceId"]
+
+    @staticmethod
+    def _parse_session_updated_at(value: Any) -> Optional[datetime]:
+        """Parse a cmux session-store `updatedAt` field into an aware UTC
+        datetime. cmux writes ISO 8601, typically with a trailing `Z`, but
+        callers may also see `+00:00` or naive timestamps. Returns None on
+        unparseable input — caller treats as "no usable timestamp"."""
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            # Python 3.11+ accepts `Z` suffix natively in fromisoformat.
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            # cmux emits UTC; treat naive timestamps as UTC rather than
+            # silently assuming local time.
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
 
     @staticmethod
     def _cmux_workspace_id_from_new_workspace(result: subprocess.CompletedProcess[Any]) -> Optional[str]:
