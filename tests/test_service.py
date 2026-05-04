@@ -1350,6 +1350,60 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
             self.assertIn("cmux CLI not found", "\n".join(logs.output))
 
+    def test_cmux_callback_writes_recovery_signal_when_session_id_missing(self):
+        """CC-95 HIGH#4: a cmux-callback timer with no `session_id` must still
+        persist its payload to disk before any early-return. Pre-fix, the
+        signal-file write lived inside the ``if session_id:`` branch in
+        ``_cmux_callback`` (service.py:967), so timers that were never bound
+        to a Claude session lost their payload whenever cmux delivery failed
+        (missing CLI / missing workspace_id+surface_id / stale target with no
+        session-store fallback). Recovery files for unbound timers land under
+        ``_no-session.<timer_id>.<run_id>.wakelite-callback.json`` and carry
+        the full status payload so a future operator or tool can recover."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            missing = str(Path(td) / "missing-cmux")
+            timer = _basic_timer("cmux-no-session", "echo hi")
+            timer["callback"] = {
+                "type": "cmux",
+                "workspace_id": "ws-orphan",
+                "surface_id": "sf-orphan",
+                "cli_path": missing,
+            }
+
+            with self.assertLogs("wakelite.service", level="INFO") as logs:
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-no-sess", _stdout_file(td), 1.0
+                )
+
+            signal_dir = Path(td) / ".claude" / "session-signals"
+            recovery = list(
+                signal_dir.glob(
+                    "_no-session.*.run-cmux-no-sess.wakelite-callback.json"
+                )
+            )
+            self.assertTrue(
+                recovery,
+                f"expected _no-session recovery file in {signal_dir}, got: "
+                f"{list(signal_dir.iterdir()) if signal_dir.exists() else 'no dir'}",
+            )
+
+            payload = json.loads(recovery[0].read_text())
+            self.assertEqual(payload["timer_name"], "cmux-no-session")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["run_id"], "run-cmux-no-sess")
+
+            # Session-keyed file MUST NOT be created — there is no session.
+            self.assertFalse(_cmux_signal_files(td, "sess-cmux"))
+
+            log_text = "\n".join(logs.output)
+            # The missing-CLI ERROR is preserved (durability is the only
+            # behavior change — error semantics unchanged).
+            self.assertIn("cmux CLI not found", log_text)
+            # Recovery write was logged at INFO before the early-return.
+            self.assertIn("_no-session.", log_text)
+
     def test_cmux_new_workspace_fallback_polls_for_tty_ready(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)

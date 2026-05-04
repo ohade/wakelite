@@ -901,24 +901,37 @@ class WakeLiteService:
 
     def _write_callback_signal(
         self,
-        session_id: str,
+        session_id: Optional[str],
         run_id: str,
         timer_name: str,
         status: str,
         exit_code: Optional[int],
         duration_str: str,
         stdout_tail: str,
-    ) -> None:
+        timer_id: Optional[str] = None,
+    ) -> Path:
         """Write callback data to signal file for Claude Code hook to pick up.
 
         Uses run_id in filename to prevent overlapping callbacks from
         overwriting each other (bug found during /consult 2026-04-07).
+
+        CC-95 HIGH#4: when ``session_id`` is None (e.g., a cmux-callback timer
+        that was never bound to a Claude session), the file lands under a
+        synthetic ``_no-session.<timer_id>.<run_id>.wakelite-callback.json``
+        name so the payload remains durable on disk for human / tooling
+        recovery. The session-keyed inject hook globs ``<session>.*.json`` and
+        will not pick the synthetic name up automatically — that is by design,
+        because there is no live session to inject into.
         """
         import datetime as _dt
 
         signal_dir = Path.home() / ".claude" / "session-signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
-        signal_file = signal_dir / f"{session_id}.{run_id}.wakelite-callback.json"
+        if session_id:
+            signal_file = signal_dir / f"{session_id}.{run_id}.wakelite-callback.json"
+        else:
+            slug = (timer_id or "unknown").replace("/", "_")
+            signal_file = signal_dir / f"_no-session.{slug}.{run_id}.wakelite-callback.json"
 
         signal_data = {
             "timer_name": timer_name,
@@ -931,6 +944,7 @@ class WakeLiteService:
         }
         signal_file.write_text(json.dumps(signal_data, indent=2))
         logger.info("Wrote callback signal file: %s", signal_file)
+        return signal_file
 
     # ── cmux callback ─────────────────────────────────────────────────
 
@@ -964,8 +978,25 @@ class WakeLiteService:
             f"This timer was created during your session. Act on the results above."
         )
 
+        # CC-95 HIGH#4: persist the recovery signal file BEFORE any early-return
+        # path. Pre-fix, the write only happened inside the `if session_id:`
+        # branch, so a cmux-callback timer with no session binding silently lost
+        # its payload whenever cmux delivery failed (missing CLI, missing
+        # workspace_id/surface_id, or stale target with no session-store
+        # fallback). Writing first guarantees the data is recoverable on disk
+        # regardless of which downstream branch we take.
+        self._write_callback_signal(
+            session_id,
+            run_id,
+            timer_name,
+            status,
+            exit_code,
+            duration,
+            stdout_tail,
+            timer_id=timer_id,
+        )
+
         if session_id:
-            self._write_callback_signal(session_id, run_id, timer_name, status, exit_code, duration, stdout_tail)
             trigger = f"[WakeLite: {timer_name} completed ({status})]"
         else:
             trigger = message
