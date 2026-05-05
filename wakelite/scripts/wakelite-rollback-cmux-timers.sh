@@ -1,7 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WAKELITECTL="${WAKELITECTL:-$HOME/git/playground/wakelite/bin/wakelitectl}"
+# CC-95 HIGH#6: resolve WAKELITECTL by precedence rather than hardcoding a
+# user-specific install path. Order:
+#   1. $WAKELITECTL env override (caller forces a specific binary). A
+#      non-executable override is a hard error — we do NOT silently fall
+#      through to other candidates because the caller's intent was explicit.
+#   2. <script_dir>/../../bin/wakelitectl  — the canonical repo layout. The
+#      script lives at <repo>/wakelite/scripts/, the binary at <repo>/bin/,
+#      so two parent-hops resolve correctly. Authoritative when run in-place
+#      from a checkout.
+#   3. `command -v wakelitectl`            — installed on PATH (e.g. via a
+#      symlink or shim).
+# Each candidate must exist AND be executable. A missing binary fails at
+# resolve time with a clear message rather than masquerading as an unrelated
+# subprocess failure later.
+__resolve_wakelitectl() {
+  # Errors print directly from this function. The caller treats any non-zero
+  # exit as terminal — no second-pass error rendering. (Earlier two-tier
+  # design hit a bash quirk: $? inside `then` of `if ! cmd` is 0 because of
+  # the `!` operator's own exit, so the rc-discrimination silently failed.)
+  if [[ -n "${WAKELITECTL:-}" ]]; then
+    if [[ -x "$WAKELITECTL" ]]; then
+      printf '%s' "$WAKELITECTL"
+      return 0
+    fi
+    printf 'error: WAKELITECTL=%s is not executable\n' "$WAKELITECTL" >&2
+    return 1
+  fi
+
+  # Resolve the directory containing THIS script, even if invoked via a
+  # symlink. Avoids `realpath` (not available on stock macOS bash 3.2).
+  local script_path script_dir
+  script_path="${BASH_SOURCE[0]}"
+  while [[ -L "$script_path" ]]; do
+    local link_target
+    link_target="$(readlink "$script_path")"
+    if [[ "$link_target" == /* ]]; then
+      script_path="$link_target"
+    else
+      script_path="$(cd "$(dirname "$script_path")" && pwd)/$link_target"
+    fi
+  done
+  script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+
+  local candidate
+  candidate="$script_dir/../../bin/wakelitectl"
+  if [[ -x "$candidate" ]]; then
+    # Normalize away the ../../ for cleaner error messages later.
+    candidate="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  if candidate="$(command -v wakelitectl 2>/dev/null)"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  printf 'error: could not locate wakelitectl. Set $WAKELITECTL, install it on PATH, or run this script from a checkout so <script_dir>/../../bin/wakelitectl resolves.\n' >&2
+  return 1
+}
+
+WAKELITECTL="$(__resolve_wakelitectl)" || exit 1
+
 TIMER_FILE="${WAKELITE_TIMER_FILE:-${WAKELITE_HOME:-$HOME/.wakelite}/timers.json}"
 
 usage() {
