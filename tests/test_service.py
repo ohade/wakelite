@@ -1404,6 +1404,158 @@ class CmuxCallbackTests(unittest.TestCase):
             # Recovery write was logged at INFO before the early-return.
             self.assertIn("_no-session.", log_text)
 
+    def test_cmux_callback_recovery_slug_sanitizes_hostile_timer_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            missing = str(Path(td) / "missing-cmux")
+            timer = _basic_timer("cmux-hostile-id", "echo hi")
+            timer["id"] = "../etc\x00 a:b\nfoo"
+            timer["callback"] = {
+                "type": "cmux",
+                "workspace_id": "ws-hostile",
+                "surface_id": "sf-hostile",
+                "session_id": None,
+                "cli_path": missing,
+            }
+
+            with self.assertLogs("wakelite.service", level="INFO"):
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-hostile", _stdout_file(td), 1.0
+                )
+
+            signal_dir = Path(td) / ".claude" / "session-signals"
+            recovery = list(signal_dir.glob("_no-session.*.wakelite-callback.json"))
+            self.assertEqual(len(recovery), 1)
+
+            filename = recovery[0].name
+            self.assertRegex(
+                filename,
+                r"^_no-session\.[A-Za-z0-9_.-]+\..*\.wakelite-callback\.json$",
+            )
+            prefix = "_no-session."
+            suffix = ".run-cmux-hostile.wakelite-callback.json"
+            self.assertTrue(filename.startswith(prefix))
+            self.assertTrue(filename.endswith(suffix))
+            slug = filename[len(prefix):-len(suffix)]
+            for unsafe in ("/", "\\", " ", "\x00", "\n", "..", ":"):
+                self.assertNotIn(unsafe, slug)
+            self.assertLessEqual(len(slug), 80)
+
+            payload = json.loads(recovery[0].read_text())
+            self.assertEqual(payload["timer_name"], "cmux-hostile-id")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["run_id"], "run-cmux-hostile")
+
+    def test_cmux_callback_writes_recovery_signal_when_session_id_missing_and_workspace_id_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer(
+                "cmux-no-session-no-workspace",
+                workspace_id=None,
+                surface_id=None,
+                session_id=None,
+                cli_path=cmux,
+            )
+
+            with self.assertLogs("wakelite.service", level="ERROR") as logs:
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-no-workspace", _stdout_file(td), 1.0
+                )
+
+            signal_dir = Path(td) / ".claude" / "session-signals"
+            recovery = list(
+                signal_dir.glob(
+                    "_no-session.*.run-cmux-no-workspace.wakelite-callback.json"
+                )
+            )
+            self.assertEqual(len(recovery), 1)
+
+            payload = json.loads(recovery[0].read_text())
+            self.assertEqual(payload["timer_name"], "cmux-no-session-no-workspace")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["run_id"], "run-cmux-no-workspace")
+
+            log_text = "\n".join(logs.output)
+            self.assertIn("missing workspace_id or surface_id", log_text)
+            session_keyed = [
+                path for path in signal_dir.glob("*.run-cmux-no-workspace.wakelite-callback.json")
+                if not path.name.startswith("_no-session.")
+            ]
+            self.assertEqual(session_keyed, [])
+
+    def test_cmux_callback_writes_recovery_signal_when_session_id_missing_and_target_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer(
+                "cmux-no-session-stale",
+                workspace_id="ws-X",
+                surface_id="sf-X",
+                session_id=None,
+                cli_path=cmux,
+            )
+
+            def side_effect(args, **kwargs):
+                if args[:6] == [cmux, "send", "--workspace", "ws-X", "--surface", "sf-X"]:
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="surface not found")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with patch("wakelite.service.subprocess.run", side_effect=side_effect), \
+                 self.assertLogs("wakelite.service", level="ERROR") as logs:
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-no-session-stale", _stdout_file(td), 1.0
+                )
+
+            signal_dir = Path(td) / ".claude" / "session-signals"
+            recovery = list(
+                signal_dir.glob(
+                    "_no-session.*.run-cmux-no-session-stale.wakelite-callback.json"
+                )
+            )
+            self.assertEqual(len(recovery), 1)
+
+            payload = json.loads(recovery[0].read_text())
+            self.assertEqual(payload["timer_name"], "cmux-no-session-stale")
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["run_id"], "run-cmux-no-session-stale")
+
+            log_text = "\n".join(logs.output)
+            self.assertIn("no session_id is available for fallback", log_text)
+            session_keyed = [
+                path for path in signal_dir.glob("*.run-cmux-no-session-stale.wakelite-callback.json")
+                if not path.name.startswith("_no-session.")
+            ]
+            self.assertEqual(session_keyed, [])
+
+    def test_cmux_callback_recovery_write_failure_logs_error_and_continues(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _cmux_callback_timer("cmux-recovery-write-fails", cli_path=cmux)
+
+            with patch.object(svc, "_write_callback_signal", side_effect=OSError("disk full")), \
+                 patch("wakelite.service.subprocess.run") as mock_run, \
+                 self.assertLogs("wakelite.service", level="ERROR") as logs:
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-write-fails", _stdout_file(td), 1.0
+                )
+
+            log_text = "\n".join(logs.output)
+            self.assertIn("Recovery signal write failed for timer", log_text)
+            self.assertIn("disk full", log_text)
+            send_calls = [
+                call.args[0]
+                for call in mock_run.call_args_list
+                if call.args and call.args[0][1] == "send"
+            ]
+            self.assertTrue(send_calls)
+
     def test_cmux_new_workspace_fallback_polls_for_tty_ready(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)

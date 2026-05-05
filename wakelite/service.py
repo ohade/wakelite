@@ -930,7 +930,7 @@ class WakeLiteService:
         if session_id:
             signal_file = signal_dir / f"{session_id}.{run_id}.wakelite-callback.json"
         else:
-            slug = (timer_id or "unknown").replace("/", "_")
+            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(timer_id or "unknown")).strip("._")[:80] or "unknown"
             signal_file = signal_dir / f"_no-session.{slug}.{run_id}.wakelite-callback.json"
 
         signal_data = {
@@ -985,16 +985,24 @@ class WakeLiteService:
         # workspace_id/surface_id, or stale target with no session-store
         # fallback). Writing first guarantees the data is recoverable on disk
         # regardless of which downstream branch we take.
-        self._write_callback_signal(
-            session_id,
-            run_id,
-            timer_name,
-            status,
-            exit_code,
-            duration,
-            stdout_tail,
-            timer_id=timer_id,
-        )
+        try:
+            self._write_callback_signal(
+                session_id,
+                run_id,
+                timer_name,
+                status,
+                exit_code,
+                duration,
+                stdout_tail,
+                timer_id=timer_id,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error(
+                "Recovery signal write failed for timer %s run %s: %s",
+                timer_id,
+                run_id,
+                exc,
+            )
 
         if session_id:
             trigger = f"[WakeLite: {timer_name} completed ({status})]"
