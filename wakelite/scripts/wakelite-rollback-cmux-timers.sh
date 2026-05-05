@@ -1,7 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WAKELITECTL="${WAKELITECTL:-$HOME/git/playground/wakelite/bin/wakelitectl}"
+# CC-95 HIGH#6: resolve WAKELITECTL by precedence rather than hardcoding a
+# user-specific install path. Order:
+#   1. $WAKELITECTL env override (caller forces a specific binary). A
+#      non-executable override is a hard error — we do NOT silently fall
+#      through to other candidates because the caller's intent was explicit.
+#   2. <script_dir>/../../bin/wakelitectl  — the canonical repo layout. The
+#      script lives at <repo>/wakelite/scripts/, the binary at <repo>/bin/,
+#      so two parent-hops resolve correctly. Authoritative when run in-place
+#      from a checkout.
+#   3. `command -v wakelitectl`            — installed on PATH (e.g. via a
+#      symlink or shim).
+# Each candidate must exist AND be executable. A missing binary fails at
+# resolve time with a clear message rather than masquerading as an unrelated
+# subprocess failure later.
+__resolve_wakelitectl() {
+  # Errors print directly from this function. The caller treats any non-zero
+  # exit as terminal — no second-pass error rendering. (Earlier two-tier
+  # design hit a bash quirk: $? inside `then` of `if ! cmd` is 0 because of
+  # the `!` operator's own exit, so the rc-discrimination silently failed.)
+  if [[ -n "${WAKELITECTL:-}" ]]; then
+    if [[ -x "$WAKELITECTL" ]]; then
+      printf '%s' "$WAKELITECTL"
+      return 0
+    fi
+    printf 'error: WAKELITECTL=%s is not executable\n' "$WAKELITECTL" >&2
+    return 1
+  fi
+
+  # Resolve the directory containing THIS script, even if invoked via a
+  # symlink. Avoids `realpath` (not available on stock macOS bash 3.2).
+  local script_path script_dir
+  script_path="${BASH_SOURCE[0]}"
+  while [[ -L "$script_path" ]]; do
+    local link_target
+    link_target="$(readlink "$script_path")"
+    if [[ "$link_target" == /* ]]; then
+      script_path="$link_target"
+    else
+      script_path="$(cd "$(dirname "$script_path")" && pwd)/$link_target"
+    fi
+  done
+  script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+
+  local candidate
+  candidate="$script_dir/../../bin/wakelitectl"
+  if [[ -x "$candidate" ]]; then
+    # Normalize away the ../../ for cleaner error messages later.
+    candidate="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  if candidate="$(command -v wakelitectl 2>/dev/null)"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  printf 'error: could not locate wakelitectl. Set $WAKELITECTL, install it on PATH, or run this script from a checkout so <script_dir>/../../bin/wakelitectl resolves.\n' >&2
+  return 1
+}
+
+WAKELITECTL="$(__resolve_wakelitectl)" || exit 1
+
 TIMER_FILE="${WAKELITE_TIMER_FILE:-${WAKELITE_HOME:-$HOME/.wakelite}/timers.json}"
 
 usage() {
@@ -35,13 +97,19 @@ load_timers_json() {
 }
 
 cmux_timers_json() {
+  # NOTE: `(.enabled // true) == true` is BROKEN — jq's // alternative
+  # operator returns the alternative when the LHS is null OR FALSE, so
+  # `false // true` evaluates to `true` and explicitly-disabled timers
+  # leak through. Use `(.enabled != false)` instead: missing/null both
+  # default to enabled (treated as != false), explicit `false` filters
+  # out. Caught by tests/test_rollback_cmux_timers.sh case 04.
   load_timers_json | jq '
     def timers:
       if type == "object" and has("timers") then .timers
       elif type == "array" then .
       else []
       end;
-    [timers[]? | select((.enabled // true) == true and ((.callback // {}).type == "cmux"))]
+    [timers[]? | select((.enabled != false) and ((.callback // {}).type == "cmux"))]
   '
 }
 
@@ -67,9 +135,14 @@ neutralize() {
     return 0
   fi
 
+  # NOTE: `trap 'rm -f "$patch"' RETURN` was previously used here, but the
+  # RETURN trap fires AFTER the function's locals go out of scope in some
+  # bash invocation contexts (subshells from `bash script.sh` vs sourced),
+  # producing a `set -u` "patch: unbound variable" error. Inline cleanup
+  # at every exit path is more verbose but bulletproof. Caught by
+  # tests/test_rollback_cmux_timers.sh case 11/12.
   local patch
   patch="$(mktemp)"
-  trap 'rm -f "$patch"' RETURN
   printf '{"callback":null}\n' >"$patch"
 
   printf '%s\n' "$timers" | jq -r '.[].id' | while IFS= read -r timer_id; do
@@ -77,6 +150,8 @@ neutralize() {
     update_timer_callback "$timer_id" "$patch"
     printf 'Neutralized cmux callback for timer %s\n' "$timer_id"
   done
+
+  rm -f "$patch"
 }
 
 rewrite() {
@@ -91,10 +166,8 @@ rewrite() {
     return 0
   fi
 
-  local patch
-  patch="$(mktemp)"
-  trap 'rm -f "$patch"' RETURN
-
+  # See neutralize() for why we don't use `trap RETURN` for tmpfile cleanup.
+  # Run target validation BEFORE creating the tmpfile so a die() doesn't leak.
   case "$target" in
     ghostty)
       [[ -n "${GHOSTTY_TERMINAL_ID:-}" ]] || die "--rewrite ghostty requires GHOSTTY_TERMINAL_ID"
@@ -106,6 +179,9 @@ rewrite() {
       die "--rewrite target must be ghostty or wezterm"
       ;;
   esac
+
+  local patch
+  patch="$(mktemp)"
 
   printf '%s\n' "$timers" | jq -c '.[] | {id, session_id: (.callback.session_id // "")}' | while IFS= read -r row; do
     local timer_id session_id
@@ -125,6 +201,8 @@ rewrite() {
     update_timer_callback "$timer_id" "$patch"
     printf 'Rewrote cmux callback for timer %s to %s\n' "$timer_id" "$target"
   done
+
+  rm -f "$patch"
 }
 
 main() {
