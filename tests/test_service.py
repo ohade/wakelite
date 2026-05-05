@@ -1694,6 +1694,62 @@ class CmuxCallbackTests(unittest.TestCase):
                     self.assertEqual(payload["status"], "success")
                     self.assertEqual(payload["run_id"], run_id)
 
+    def test_cmux_callback_colliding_slugs_dont_clobber_each_other(self):
+        """CC-95 MEDIUM (claude-nyx, claude-artemis): two distinct hostile
+        timer ids that the slug regex normalizes to the SAME slug must still
+        produce TWO distinct recovery signal files when fired with different
+        run_ids.
+
+        The audit identified that ``a/b`` and ``a:b`` both substitute to
+        ``a_b`` after the ``[^A-Za-z0-9_.-]+`` regex, so the slug component
+        of the recovery filename is identical. The run_id segment is what
+        prevents the second callback from clobbering the first. This test
+        locks that guarantee in.
+        """
+        ids_with_same_slug = ("a/b", "a:b")
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            missing = str(Path(td) / "missing-cmux")
+            signal_dir = Path(td) / ".claude" / "session-signals"
+
+            for idx, raw_id in enumerate(ids_with_same_slug):
+                timer = _basic_timer(f"cmux-collide-{idx}", "echo hi")
+                timer["id"] = raw_id
+                timer["callback"] = {
+                    "type": "cmux",
+                    "workspace_id": "ws-collide",
+                    "surface_id": "sf-collide",
+                    "session_id": None,
+                    "cli_path": missing,
+                }
+                run_id = f"run-collide-{idx}"
+                with self.assertLogs("wakelite.service", level="INFO"):
+                    svc._execute_callback(
+                        timer, "success", 0, run_id, _stdout_file(td), 1.0
+                    )
+
+            recovery_files = sorted(signal_dir.glob("_no-session.*.wakelite-callback.json"))
+            self.assertEqual(
+                len(recovery_files), 2,
+                f"colliding slugs lost a recovery file. Files: {[p.name for p in recovery_files]}",
+            )
+
+            slug_substring = "_no-session.a_b."
+            slug_prefixed = [p for p in recovery_files if slug_substring in p.name]
+            self.assertEqual(
+                len(slug_prefixed), 2,
+                f"both files should share the normalized 'a_b' slug; got: {[p.name for p in recovery_files]}",
+            )
+
+            run_ids_seen = sorted(json.loads(p.read_text())["run_id"] for p in recovery_files)
+            self.assertEqual(run_ids_seen, ["run-collide-0", "run-collide-1"])
+
+            self.assertNotEqual(
+                recovery_files[0].name, recovery_files[1].name,
+                "two distinct recovery files must have distinct names — run_id is the disambiguator",
+            )
+
     def test_cmux_callback_writes_recovery_signal_when_session_id_missing_and_workspace_id_missing(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)

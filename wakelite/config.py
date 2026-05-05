@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+_LOG = logging.getLogger(__name__)
 
 APP_NAME = "wakelite"
 OWNER = "com.wakelite"
@@ -61,6 +64,19 @@ def auto_capture_terminal(callback: dict) -> None:
     # that fails timer_store validation at create time. Stale env carryover from a
     # parent process (e.g. CMUX_SURFACE_ID leaked into a non-cmux subshell) must not
     # misclassify the terminal.
+    #
+    # CC-95 MEDIUM (claude-nyx, claude-artemis): when partial cmux env is rejected,
+    # emit a debug log so an operator debugging "why isn't my cmux callback being
+    # captured?" has a signal that the partial-env was the cause. Without this,
+    # the path looks identical to "no cmux env at all" — see audit finding F-CC95-MED-1.
+    if (cmux_workspace or cmux_surface) and not (cmux_workspace and cmux_surface):
+        _LOG.debug(
+            "auto_capture: partial cmux env rejected (workspace=%r surface=%r); "
+            "falling through to ghostty/wezterm detection",
+            cmux_workspace,
+            cmux_surface,
+        )
+
     if cmux_workspace and cmux_surface:
         callback.setdefault("type", "cmux")
         if callback.get("type") == "cmux":

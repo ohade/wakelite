@@ -20,8 +20,16 @@ __resolve_wakelitectl() {
   # exit as terminal — no second-pass error rendering. (Earlier two-tier
   # design hit a bash quirk: $? inside `then` of `if ! cmd` is 0 because of
   # the `!` operator's own exit, so the rc-discrimination silently failed.)
+  #
+  # On success this function ALSO emits a diagnostic line to stderr naming
+  # which precedence tier won (env-override / repo-relative / path). For
+  # incident postmortems on emergency cmux rollback, knowing whether the
+  # script ran a stale PATH binary vs the live repo binary is the difference
+  # between "rollback worked but applied the wrong logic" and "rollback ran
+  # what we wanted." (CC-95 MEDIUM, claude-nyx + claude-artemis converged.)
   if [[ -n "${WAKELITECTL:-}" ]]; then
     if [[ -x "$WAKELITECTL" ]]; then
+      printf 'wakelite-rollback: using wakelitectl=%s (tier=env-override)\n' "$WAKELITECTL" >&2
       printf '%s' "$WAKELITECTL"
       return 0
     fi
@@ -49,11 +57,13 @@ __resolve_wakelitectl() {
   if [[ -x "$candidate" ]]; then
     # Normalize away the ../../ for cleaner error messages later.
     candidate="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+    printf 'wakelite-rollback: using wakelitectl=%s (tier=repo-relative)\n' "$candidate" >&2
     printf '%s' "$candidate"
     return 0
   fi
 
   if candidate="$(command -v wakelitectl 2>/dev/null)"; then
+    printf 'wakelite-rollback: using wakelitectl=%s (tier=path)\n' "$candidate" >&2
     printf '%s' "$candidate"
     return 0
   fi
@@ -138,10 +148,17 @@ neutralize() {
   # NOTE: `trap 'rm -f "$patch"' RETURN` was previously used here, but the
   # RETURN trap fires AFTER the function's locals go out of scope in some
   # bash invocation contexts (subshells from `bash script.sh` vs sourced),
-  # producing a `set -u` "patch: unbound variable" error. Inline cleanup
-  # at every exit path is more verbose but bulletproof. Caught by
-  # tests/test_rollback_cmux_timers.sh case 11/12.
-  local patch
+  # producing a `set -u` "patch: unbound variable" error. Earlier fix used
+  # inline cleanup at every exit path, but `set -euo pipefail` causes the
+  # function to exit BEFORE the trailing `rm -f` if `update_timer_callback`
+  # fails — leaking the tmpfile. CC-95 MEDIUM (5/5 engines): switch to
+  # function-local `trap EXIT` with `${patch:-}` for set-u safety. EXIT
+  # fires regardless of how the function terminates; locals at that point
+  # are still in scope because the trap is installed BEFORE local
+  # assignment, but `${patch:-}` parameter expansion is set-u-safe even
+  # if the trap fires before the assignment lands.
+  local patch=""
+  trap 'rm -f "${patch:-}"' EXIT
   patch="$(mktemp)"
   printf '{"callback":null}\n' >"$patch"
 
@@ -152,6 +169,7 @@ neutralize() {
   done
 
   rm -f "$patch"
+  trap - EXIT
 }
 
 rewrite() {
@@ -166,8 +184,9 @@ rewrite() {
     return 0
   fi
 
-  # See neutralize() for why we don't use `trap RETURN` for tmpfile cleanup.
-  # Run target validation BEFORE creating the tmpfile so a die() doesn't leak.
+  # See neutralize() for why we use `trap EXIT` (with ${patch:-} for set-u
+  # safety) instead of `trap RETURN` or pure inline cleanup. Run target
+  # validation BEFORE creating the tmpfile so a die() doesn't leak it.
   case "$target" in
     ghostty)
       [[ -n "${GHOSTTY_TERMINAL_ID:-}" ]] || die "--rewrite ghostty requires GHOSTTY_TERMINAL_ID"
@@ -180,7 +199,8 @@ rewrite() {
       ;;
   esac
 
-  local patch
+  local patch=""
+  trap 'rm -f "${patch:-}"' EXIT
   patch="$(mktemp)"
 
   printf '%s\n' "$timers" | jq -c '.[] | {id, session_id: (.callback.session_id // "")}' | while IFS= read -r row; do
@@ -203,6 +223,7 @@ rewrite() {
   done
 
   rm -f "$patch"
+  trap - EXIT
 }
 
 main() {

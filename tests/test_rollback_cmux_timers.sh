@@ -155,12 +155,16 @@ EOF
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ TEST 01 — bash -n syntax check                                       ║
 # ╚══════════════════════════════════════════════════════════════════════╝
+# CC-95 MEDIUM (claude-artemis, claude-nyx): rewrite Test 01 to match the
+# `suite_rc=0; ... || suite_rc=1; end_test $suite_rc` pattern used by every
+# other test in this harness. The previous `FAILED_FORCE` flag pattern was
+# the odd one out — a maintenance hazard if a future edit drops the
+# `unset FAILED_FORCE` line, tests would double-count or skip silently.
 start_test "01 bash -n syntax check"
-( bash -n "$SCRIPT" ) >/dev/null 2>&1
-rc=$?
-assert_eq "exit code" "0" "$rc" || { end_test 1; FAILED_FORCE=1; }
-[[ "${FAILED_FORCE:-0}" -eq 1 ]] || end_test 0
-unset FAILED_FORCE
+suite_rc=0
+( bash -n "$SCRIPT" ) >/dev/null 2>&1 || suite_rc=1
+assert_eq "exit code" "0" "$suite_rc" || suite_rc=1
+end_test $suite_rc
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ TEST 02 — usage error on no args                                     ║
@@ -188,7 +192,10 @@ end_test $suite_rc
 start_test "04 --list filters to enabled cmux timers only"
 TMP=$(mktemp -d); MOCK="$TMP/wakelitectl"
 make_mock_wakelitectl "$MOCK" "$MIXED_FIXTURE"
-out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>&1); rc=$?
+# CC-95 MEDIUM: redirect stderr to /dev/null so the new tier-log diagnostic
+# (`wakelite-rollback: using wakelitectl=... (tier=...)`) doesn't corrupt the
+# JSON-parsing assertions. The log line is exercised explicitly by tests 17/19.
+out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>/dev/null); rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
 assert_json_eq "count of cmux entries" "length" "$out" "2" || suite_rc=1
@@ -207,7 +214,7 @@ end_test $suite_rc
 start_test "05 --list handles top-level-array fixture shape"
 TMP=$(mktemp -d); MOCK="$TMP/wakelitectl"
 make_mock_wakelitectl "$MOCK" "$ARRAY_FIXTURE"
-out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>&1); rc=$?
+out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>/dev/null); rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
 assert_json_eq "count" "length" "$out" "1" || suite_rc=1
@@ -221,7 +228,7 @@ end_test $suite_rc
 start_test "06 --list returns empty when no cmux timers"
 TMP=$(mktemp -d); MOCK="$TMP/wakelitectl"
 make_mock_wakelitectl "$MOCK" "$EMPTY_FIXTURE"
-out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>&1); rc=$?
+out=$(WAKELITECTL="$MOCK" bash "$SCRIPT" --list 2>/dev/null); rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
 assert_json_eq "count" "length" "$out" "0" || suite_rc=1
@@ -241,13 +248,16 @@ EOF
 chmod +x "$TMP/wakelitectl"
 # Stage timer fixture as the timer file
 printf '%s' "$MIXED_FIXTURE" > "$TMP/timers.json"
-out=$(WAKELITECTL="$TMP/wakelitectl" WAKELITE_TIMER_FILE="$TMP/timers.json" bash "$SCRIPT" --list 2>&1)
+# CC-95 MEDIUM: split stderr (tier-log + fallback warning) from stdout (JSON).
+# Stdout is now pure JSON; stderr is asserted separately for the warning content.
+err_log="$TMP/err.log"
+out=$(WAKELITECTL="$TMP/wakelitectl" WAKELITE_TIMER_FILE="$TMP/timers.json" bash "$SCRIPT" --list 2>"$err_log")
 rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
-# Strip the leading warning line, parse the rest as JSON
-clean=$(printf '%s\n' "$out" | grep -v '^warning:')
-assert_json_eq "count" "length" "$clean" "2" || suite_rc=1
+assert_json_eq "count" "length" "$out" "2" || suite_rc=1
+err_text=$(cat "$err_log")
+assert_contains "wakelitectl-failed warning" "wakelitectl timer list failed" "$err_text" || suite_rc=1
 rm -rf "$TMP"
 end_test $suite_rc
 
@@ -262,12 +272,13 @@ cat > "$TMP/wakelitectl" <<'EOF'
 exit 1
 EOF
 chmod +x "$TMP/wakelitectl"
-out=$(WAKELITECTL="$TMP/wakelitectl" WAKELITE_TIMER_FILE="$TMP/does-not-exist.json" bash "$SCRIPT" --list 2>&1)
+# CC-95 MEDIUM: split stderr (warning + tier-log) from stdout (JSON).
+err_log="$TMP/err.log"
+out=$(WAKELITECTL="$TMP/wakelitectl" WAKELITE_TIMER_FILE="$TMP/does-not-exist.json" bash "$SCRIPT" --list 2>"$err_log")
 rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
-clean=$(printf '%s\n' "$out" | grep -v '^warning:')
-assert_json_eq "count" "length" "$clean" "0" || suite_rc=1
+assert_json_eq "count" "length" "$out" "0" || suite_rc=1
 rm -rf "$TMP"
 end_test $suite_rc
 
@@ -328,12 +339,19 @@ out=$(GHOSTTY_TERMINAL_ID="ghostty-uuid-zzz" WAKELITECTL="$MOCK" \
   bash "$SCRIPT" --rewrite ghostty 2>&1); rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
-# t-cmux-01 has session_id, t-cmux-02 doesn't
+# CC-95 MEDIUM (codex-artemis, claude-artemis): assert each expected patch
+# file actually exists. Pre-fix, the `if [[ -f ... ]]` guards would silently
+# skip the inner assertions if rewrite() failed before producing a patch,
+# turning a regression into a green test. Now the missing-patch case fails
+# the suite explicitly.
 if [[ -f "$MOCK.patches/t-cmux-01.json" ]]; then
   c=$(cat "$MOCK.patches/t-cmux-01.json")
   assert_json_eq "t-01 type"        '.callback.type'        "$c" "ghostty" || suite_rc=1
   assert_json_eq "t-01 terminal_id" '.callback.terminal_id' "$c" "ghostty-uuid-zzz" || suite_rc=1
   assert_json_eq "t-01 session_id"  '.callback.session_id'  "$c" "sess-1" || suite_rc=1
+else
+  printf '   FAIL no patch file for t-cmux-01 (rewrite produced no patch)\n'
+  suite_rc=1
 fi
 if [[ -f "$MOCK.patches/t-cmux-02.json" ]]; then
   c=$(cat "$MOCK.patches/t-cmux-02.json")
@@ -341,6 +359,9 @@ if [[ -f "$MOCK.patches/t-cmux-02.json" ]]; then
   assert_json_eq "t-02 terminal_id" '.callback.terminal_id'         "$c" "ghostty-uuid-zzz" || suite_rc=1
   # When source has no session_id, patch must NOT carry one (would be invalid).
   assert_json_eq "t-02 no session_id" '.callback | has("session_id")' "$c" "false" || suite_rc=1
+else
+  printf '   FAIL no patch file for t-cmux-02 (rewrite produced no patch)\n'
+  suite_rc=1
 fi
 rm -rf "$TMP"
 end_test $suite_rc
@@ -355,11 +376,16 @@ out=$(WEZTERM_PANE="42" WAKELITECTL="$MOCK" \
   bash "$SCRIPT" --rewrite wezterm 2>&1); rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
+# CC-95 MEDIUM: same fix as test 11 — fail explicitly when rewrite produced
+# no patch instead of silently passing through a missing-file case.
 if [[ -f "$MOCK.patches/t-cmux-01.json" ]]; then
   c=$(cat "$MOCK.patches/t-cmux-01.json")
   assert_json_eq "type"     '.callback.type'           "$c" "wezterm" || suite_rc=1
   assert_json_eq "pane_id"  '.callback.pane_id'        "$c" "42" || suite_rc=1
   assert_json_eq "pane num" '.callback.pane_id | type' "$c" "number" || suite_rc=1
+else
+  printf '   FAIL no patch file for t-cmux-01 (rewrite produced no patch)\n'
+  suite_rc=1
 fi
 rm -rf "$TMP"
 end_test $suite_rc
@@ -457,11 +483,17 @@ make_mock_wakelitectl "$MOCK_DIR/wakelitectl" "$EMPTY_FIXTURE"
 # so PATH must be the resolution path that succeeds.
 SCRIPT_COPY="$TMP/standalone-rollback.sh"
 cp "$SCRIPT" "$SCRIPT_COPY"; chmod +x "$SCRIPT_COPY"
-out=$(env -i HOME="$HOME" PATH="$MOCK_DIR:/usr/bin:/bin" bash "$SCRIPT_COPY" --list 2>&1)
+# CC-95 MEDIUM: split stderr (tier-log) from stdout (JSON), but ALSO assert
+# the new diagnostic — this test is the only positive coverage that the PATH
+# tier emits the expected log line.
+err_log="$TMP/err.log"
+out=$(env -i HOME="$HOME" PATH="$MOCK_DIR:/usr/bin:/bin" bash "$SCRIPT_COPY" --list 2>"$err_log")
 rc=$?
 suite_rc=0
 assert_eq "rc" "0" "$rc" || suite_rc=1
 assert_json_eq "count" "length" "$out" "0" || suite_rc=1
+err_text=$(cat "$err_log")
+assert_contains "tier-log names PATH binary" "tier=path" "$err_text" || suite_rc=1
 rm -rf "$TMP"
 end_test $suite_rc
 
