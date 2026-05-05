@@ -503,6 +503,159 @@ class CapacityGuardTests(unittest.TestCase):
             }, idempotency_key="cap-fit")
             self.assertIn("timer", result)
 
+    def test_many_once_timers_different_days_all_fit_at_max_workers_2(self):
+        """WL-12: time-axis projection — once-timers at different future dates
+        do not share a bucket and must not block each other."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15, max_workers=2)
+
+            from datetime import date, timedelta
+            base = date.today() + timedelta(days=1)
+            for i in range(12):
+                when = base + timedelta(days=i % 6)  # 2 per day, 06:00 and 18:00
+                hour = 6 if i % 2 == 0 else 18
+                result = svc.create_timer({
+                    "name": f"once-{i}",
+                    "comment": f"Once {i}",
+                    "enabled": True,
+                    "recurrence": {"frequency": "once", "date": when.isoformat(), "time": f"{hour:02d}:00"},
+                    "command": {"mode": "shell", "shell": "echo ok"},
+                }, idempotency_key=f"once-{i}")
+                self.assertIn("timer", result)
+
+    def test_three_dailies_same_hour_blocks_at_max_workers_2(self):
+        """WL-12: three daily-06:00 timers share the same bucket → 3rd blocked."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15, max_workers=2)
+
+            for i in range(2):
+                svc.timer_store.create_timer({
+                    "name": f"dawn-{i}",
+                    "comment": f"Dawn {i}",
+                    "enabled": True,
+                    "recurrence": {"frequency": "daily", "time": "06:00"},
+                    "command": {"mode": "shell", "shell": "echo ok"},
+                })
+
+            from wakelite.service import CapacityExceededError
+            with self.assertRaises(CapacityExceededError):
+                svc.create_timer({
+                    "name": "dawn-overflow",
+                    "comment": "Third daily at 06:00 should be blocked",
+                    "enabled": True,
+                    "recurrence": {"frequency": "daily", "time": "06:00"},
+                    "command": {"mode": "shell", "shell": "echo ok"},
+                }, idempotency_key="dawn-overflow")
+
+    def test_user_resource_capacity_gates_simultaneous_timers(self):
+        """WL-12: user-declared resource with parseable capacity participates
+        in the gate. Two 30 req/min dailies at 06:00 would peak at 60 — above
+        the 50 req/min capacity — so the second must be blocked."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15, max_workers=16)
+
+            svc.timer_store.create_timer({
+                "name": "slack-poller",
+                "comment": "First Slack consumer",
+                "enabled": True,
+                "recurrence": {"frequency": "daily", "time": "06:00"},
+                "command": {"mode": "shell", "shell": "echo ok"},
+                "resources": [{"name": "slack-api", "capacity": "50 req/min", "estimated_usage": "30 req/min"}],
+            })
+
+            from wakelite.service import CapacityExceededError
+            with self.assertRaises(CapacityExceededError) as ctx:
+                svc.create_timer({
+                    "name": "slack-notifier",
+                    "comment": "Second Slack consumer at the same minute",
+                    "enabled": True,
+                    "recurrence": {"frequency": "daily", "time": "06:00"},
+                    "command": {"mode": "shell", "shell": "echo ok"},
+                    "resources": [{"name": "slack-api", "capacity": "50 req/min", "estimated_usage": "30 req/min"}],
+                }, idempotency_key="slack-overflow")
+            self.assertIn("slack-api", str(ctx.exception))
+
+    def test_twenty_once_timers_at_default_max_workers_succeed(self):
+        """WL-12 AC #1 (strict): 20 one-shot timers scheduled at different
+        dates — all succeed at the default max_workers=16."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)  # default max_workers=16
+
+            from datetime import date, timedelta
+            base = date.today() + timedelta(days=1)
+            for i in range(20):
+                when = base + timedelta(days=i % 7)
+                hour = 3 + (i % 16)  # stagger hours
+                result = svc.create_timer({
+                    "name": f"once-strict-{i}",
+                    "comment": f"Once {i}",
+                    "enabled": True,
+                    "recurrence": {"frequency": "once", "date": when.isoformat(), "time": f"{hour:02d}:{(i * 5) % 60:02d}"},
+                    "command": {"mode": "shell", "shell": "echo ok"},
+                }, idempotency_key=f"once-strict-{i}")
+                self.assertIn("timer", result)
+
+    def test_twenty_daemons_blocked_past_max_workers(self):
+        """WL-12 AC #2 (strict): adding many daemons is capped by max_workers,
+        not by a separate "max number of configured timers" budget."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15, max_workers=3)
+
+            # First 3 succeed.
+            for i in range(3):
+                svc.create_timer({
+                    "name": f"daemon-{i}",
+                    "comment": f"Daemon {i}",
+                    "enabled": True,
+                    "timer_type": "daemon",
+                    "recurrence": {"frequency": "interval", "every": "0s"},
+                    "command": {"mode": "shell", "shell": "sleep 999"},
+                }, idempotency_key=f"daemon-{i}")
+
+            # Attempts 4..20 all fail on the executor-slot resource.
+            from wakelite.service import CapacityExceededError
+            for i in range(3, 20):
+                with self.assertRaises(CapacityExceededError) as ctx:
+                    svc.create_timer({
+                        "name": f"daemon-{i}",
+                        "comment": f"Daemon {i}",
+                        "enabled": True,
+                        "timer_type": "daemon",
+                        "recurrence": {"frequency": "interval", "every": "0s"},
+                        "command": {"mode": "shell", "shell": "sleep 999"},
+                    }, idempotency_key=f"daemon-{i}")
+                self.assertIn("_executor.slot", str(ctx.exception))
+
+    def test_user_resource_at_different_times_coexist(self):
+        """WL-12: same resource, different clock times → no peak overlap → admit."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15, max_workers=16)
+
+            svc.timer_store.create_timer({
+                "name": "slack-morning",
+                "comment": "Morning Slack consumer",
+                "enabled": True,
+                "recurrence": {"frequency": "daily", "time": "06:00"},
+                "command": {"mode": "shell", "shell": "echo ok"},
+                "resources": [{"name": "slack-api", "capacity": "50 req/min", "estimated_usage": "30 req/min"}],
+            })
+
+            result = svc.create_timer({
+                "name": "slack-evening",
+                "comment": "Evening Slack consumer",
+                "enabled": True,
+                "recurrence": {"frequency": "daily", "time": "18:00"},
+                "command": {"mode": "shell", "shell": "echo ok"},
+                "resources": [{"name": "slack-api", "capacity": "50 req/min", "estimated_usage": "30 req/min"}],
+            }, idempotency_key="slack-evening")
+            self.assertIn("timer", result)
+
 
 class ResourceWarningTests(unittest.TestCase):
     def test_resource_conflict_returns_warnings(self):

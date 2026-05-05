@@ -51,6 +51,7 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `timer_store.py` | Timer CRUD on `~/.wakelite/timers.json`. Validates schema, thread-safe |
 | `state.py` | SQLite (`~/.wakelite/state.db`) — run history, runtime state, daemon state, incidents |
 | `notifier.py` | macOS notifications (`osascript`) + Slack DMs (`notify_slack()`) |
+| `capacity.py` | Time-axis per-resource admission gate. Projects each timer's resource use onto N-minute buckets over a 7-day horizon, blocks create/update when any resource's peak > capacity. Pure functions, no I/O. `_executor.slot` is a well-known resource (capacity=MAX_WORKERS); user-declared `resources[]` participate when `capacity`/`estimated_usage` parse |
 | `service.py` | **Core orchestrator.** Scheduler loop, run execution (ThreadPoolExecutor), timer lifecycle |
 | `http_api.py` | REST API handler + embedded web UI (single-file HTML/CSS/JS in Python string) |
 | `mcp_server.py` | MCP protocol bridge — translates MCP tool calls to REST API calls |
@@ -127,6 +128,49 @@ exit 75
 ```
 
 Note: Even if a script produces no output, the web UI will show run context (command, exit code, timestamps) — but explicit logging is always preferred.
+
+## Capacity gate (WL-12)
+
+`service.check_capacity()` gates timer create/update via `capacity.py`, which
+projects each timer's resource use onto a time axis and blocks when any
+declared resource's peak concurrent use would exceed its capacity.
+
+**Semantic change from the pre-WL-12 gate:** the old implementation summed
+`_estimate_slots()` across every timer regardless of when they run, so a
+daily 06:00 backup and a once-timer scheduled for 2026-05-04 09:00 competed
+for the same slot budget even though they never coexist at runtime. The new
+gate is strictly more permissive in that common case and strictly correct
+when two timers actually overlap in time. HTTP contract is preserved:
+capacity violations still return 409 with `code: CAPACITY_EXCEEDED`.
+
+**Resources.** Every timer implicitly consumes `_executor.slot` (capacity
+= `MAX_WORKERS` = 16). Daemons count as exactly 1 slot regardless of
+`execution.overlap`/`max_concurrent` — the daemon runtime keeps a single
+live process. Non-daemon timers with `overlap="allow"` consume
+`max_concurrent` slots. User-declared `resources[]` (e.g. `slack-api`,
+`ollama-gpu`) participate when their `capacity`/`estimated_usage` strings
+parse (`"50 req/min"`, `"12 req/sec"`, `"1 req/h"`, bare integers). When
+multiple timers declare the same resource with different capacities, the
+MIN is used — deterministic and conservative.
+
+**Interval phasing.** `service.check_capacity` enriches existing interval
+timers with `_last_fired_at` from `state.db` meta before calling the
+engine, so the projection uses the real scheduler phase rather than
+collapsing every interval timer to `now`. Brand-new intervals without
+history are projected from `now` (conservative).
+
+**Env knobs.** All optional, positive integers (invalid values silently
+fall back to defaults):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `WAKELITE_CAPACITY_ENABLED` | `true` | `false`/`0`/`no`/`off`/`disabled` bypasses the gate — admission-control rollback lever without code revert. |
+| `WAKELITE_CAPACITY_HORIZON_DAYS` | `7` | How far forward the projection looks. |
+| `WAKELITE_CAPACITY_BUCKET_SECONDS` | `60` | Bucket granularity. Smaller = tighter collision detection, larger = cheaper. |
+| `WAKELITE_CAPACITY_RUN_DURATION_SECONDS` | `60` | Assumed duration of one run, used to decide which buckets a fire occupies. |
+
+Bucket arithmetic uses `.timestamp()` on datetimes so DST transitions
+don't skew the 7-day axis.
 
 ## Key gotchas
 

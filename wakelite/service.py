@@ -29,6 +29,7 @@ from .config import (
     WAKE_INTENTS_FILE,
     ensure_dirs,
 )
+from . import capacity
 from .notifier import Notifier
 from .recurrence import interval_is_due, interval_window_occurrences, next_occurrence, next_window_occurrence, occurrences_between, parse_interval, parse_recurrence, upcoming_occurrences
 from .state import StateStore
@@ -247,51 +248,49 @@ class WakeLiteService:
             timer["completed_runs"] = self.state.count_completed_runs(timer["id"])
         return timer
 
-    def _estimate_slots(self, timer: Dict[str, Any]) -> int:
-        """Estimate how many executor slots this timer would consume."""
-        if not timer.get("enabled", True):
-            return 0
-        execution = timer.get("execution", {})
-        overlap = execution.get("overlap", "queue")
-        if overlap == "allow":
-            return execution.get("max_concurrent", 1)
-        return 1  # daemon, interval, or calendar timer = 1 slot
+    def _enrich_with_last_fired(self, timer: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp `_last_fired_at` on interval timers so capacity.py can phase
+        their projection correctly. Non-interval and brand-new timers are
+        unchanged. Returns a shallow copy; the store's dict is not mutated."""
+        rec = timer.get("recurrence") or {}
+        if rec.get("frequency") != "interval":
+            return timer
+        tid = timer.get("id")
+        if not tid:
+            return timer
+        last_fired_raw = self.state.get_meta(f"interval.last_fired.{tid}")
+        if not last_fired_raw:
+            return timer
+        enriched = dict(timer)
+        enriched["_last_fired_at"] = last_fired_raw
+        return enriched
 
     def check_capacity(self, new_timer: Dict[str, Any], exclude_timer_id: Optional[str] = None) -> tuple:
-        """Check if adding/updating a timer would exceed max_workers.
+        """Check if adding/updating a timer would violate per-resource capacity
+        anywhere across the projection horizon.
 
         Returns (can_proceed: bool, warnings: list[str], error_msg: str | None).
         """
-        warnings: List[str] = []
-        error_msg: Optional[str] = None
-
-        # Resource conflict warnings
-        warnings.extend(self.timer_store.check_resource_conflicts(new_timer, exclude_timer_id))
-
-        # Capacity check
-        total_slots = 0
-        slot_details: List[str] = []
-        for t in self.timer_store.list_timers():
-            if exclude_timer_id and t["id"] == exclude_timer_id:
-                continue
-            slots = self._estimate_slots(t)
-            if slots > 0:
-                total_slots += slots
-                slot_details.append(f'{t.get("name", t["id"])} ({t.get("timer_type", "scheduled")}, {slots} slot{"s" if slots > 1 else ""})')
-
-        new_slots = self._estimate_slots(new_timer)
-        projected = total_slots + new_slots
-
-        if projected > self.max_workers:
-            error_msg = (
-                f"Adding this timer would exceed max concurrent capacity ({self.max_workers}). "
-                f"Current utilization: {total_slots}/{self.max_workers} active slots. "
-                f"Active timers: {', '.join(slot_details[:5])}"
+        warnings: List[str] = list(
+            self.timer_store.check_resource_conflicts(new_timer, exclude_timer_id)
+        )
+        existing = [
+            self._enrich_with_last_fired(t) for t in self.timer_store.list_timers()
+        ]
+        # On update, attach the updating timer's real phase too so raising
+        # estimated_usage is evaluated against the existing fire schedule.
+        evaluated_new = new_timer
+        if exclude_timer_id:
+            evaluated_new = self._enrich_with_last_fired(
+                {**new_timer, "id": new_timer.get("id") or exclude_timer_id}
             )
-            if len(slot_details) > 5:
-                error_msg += f" ... and {len(slot_details) - 5} more"
-
-        return (error_msg is None, warnings, error_msg)
+        can_proceed, error_msg = capacity.check_capacity(
+            evaluated_new,
+            existing,
+            self.max_workers,
+            exclude_timer_id=exclude_timer_id,
+        )
+        return (can_proceed, warnings, error_msg)
 
     def create_timer(self, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         # Pre-check capacity before idempotent wrapper
