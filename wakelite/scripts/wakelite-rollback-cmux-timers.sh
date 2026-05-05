@@ -97,13 +97,19 @@ load_timers_json() {
 }
 
 cmux_timers_json() {
+  # NOTE: `(.enabled // true) == true` is BROKEN — jq's // alternative
+  # operator returns the alternative when the LHS is null OR FALSE, so
+  # `false // true` evaluates to `true` and explicitly-disabled timers
+  # leak through. Use `(.enabled != false)` instead: missing/null both
+  # default to enabled (treated as != false), explicit `false` filters
+  # out. Caught by tests/test_rollback_cmux_timers.sh case 04.
   load_timers_json | jq '
     def timers:
       if type == "object" and has("timers") then .timers
       elif type == "array" then .
       else []
       end;
-    [timers[]? | select((.enabled // true) == true and ((.callback // {}).type == "cmux"))]
+    [timers[]? | select((.enabled != false) and ((.callback // {}).type == "cmux"))]
   '
 }
 
@@ -129,9 +135,14 @@ neutralize() {
     return 0
   fi
 
+  # NOTE: `trap 'rm -f "$patch"' RETURN` was previously used here, but the
+  # RETURN trap fires AFTER the function's locals go out of scope in some
+  # bash invocation contexts (subshells from `bash script.sh` vs sourced),
+  # producing a `set -u` "patch: unbound variable" error. Inline cleanup
+  # at every exit path is more verbose but bulletproof. Caught by
+  # tests/test_rollback_cmux_timers.sh case 11/12.
   local patch
   patch="$(mktemp)"
-  trap 'rm -f "$patch"' RETURN
   printf '{"callback":null}\n' >"$patch"
 
   printf '%s\n' "$timers" | jq -r '.[].id' | while IFS= read -r timer_id; do
@@ -139,6 +150,8 @@ neutralize() {
     update_timer_callback "$timer_id" "$patch"
     printf 'Neutralized cmux callback for timer %s\n' "$timer_id"
   done
+
+  rm -f "$patch"
 }
 
 rewrite() {
@@ -153,10 +166,8 @@ rewrite() {
     return 0
   fi
 
-  local patch
-  patch="$(mktemp)"
-  trap 'rm -f "$patch"' RETURN
-
+  # See neutralize() for why we don't use `trap RETURN` for tmpfile cleanup.
+  # Run target validation BEFORE creating the tmpfile so a die() doesn't leak.
   case "$target" in
     ghostty)
       [[ -n "${GHOSTTY_TERMINAL_ID:-}" ]] || die "--rewrite ghostty requires GHOSTTY_TERMINAL_ID"
@@ -168,6 +179,9 @@ rewrite() {
       die "--rewrite target must be ghostty or wezterm"
       ;;
   esac
+
+  local patch
+  patch="$(mktemp)"
 
   printf '%s\n' "$timers" | jq -c '.[] | {id, session_id: (.callback.session_id // "")}' | while IFS= read -r row; do
     local timer_id session_id
@@ -187,6 +201,8 @@ rewrite() {
     update_timer_callback "$timer_id" "$patch"
     printf 'Rewrote cmux callback for timer %s to %s\n' "$timer_id" "$target"
   done
+
+  rm -f "$patch"
 }
 
 main() {
