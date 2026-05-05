@@ -2093,6 +2093,91 @@ class AutoCaptureTerminalTests(unittest.TestCase):
             self.assertEqual(cb["socket_path"], str(Path(td) / "cmux.sock"))
             self.assertEqual(cb["cli_path"], cmux)
 
+    def test_auto_capture_cmux_requires_both_workspace_and_surface(self):
+        """CC-95 HIGH#5: auto-detect must NOT emit type=cmux when only one of
+        CMUX_WORKSPACE_ID / CMUX_SURFACE_ID(_PANEL_ID) is set.
+
+        Partial cmux env (e.g. stale CMUX_SURFACE_ID leaking from a parent
+        process into a non-cmux subshell, or a buggy cmux config that drops
+        one of the two) must fall through to ghostty/wezterm detection
+        rather than produce a half-populated cmux callback that fails
+        timer_store validation at create time.
+        """
+        from wakelite.config import auto_capture_terminal
+
+        # Case 1: only CMUX_SURFACE_ID — must NOT auto-detect cmux
+        cb1 = {}
+        with patch.dict(os.environ, {"CMUX_SURFACE_ID": "sf-only"}, clear=True):
+            auto_capture_terminal(cb1)
+        self.assertNotEqual(
+            cb1.get("type"), "cmux",
+            "partial cmux env (surface only) must NOT trigger cmux mode"
+        )
+        self.assertNotIn("surface_id", cb1)
+        self.assertNotIn("workspace_id", cb1)
+
+        # Case 2: only CMUX_WORKSPACE_ID — must NOT auto-detect cmux
+        cb2 = {}
+        with patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "ws-only"}, clear=True):
+            auto_capture_terminal(cb2)
+        self.assertNotEqual(
+            cb2.get("type"), "cmux",
+            "partial cmux env (workspace only) must NOT trigger cmux mode"
+        )
+        self.assertNotIn("workspace_id", cb2)
+        self.assertNotIn("surface_id", cb2)
+
+        # Case 3: only CMUX_PANEL_ID (alias for surface) — must NOT auto-detect cmux
+        cb3 = {}
+        with patch.dict(os.environ, {"CMUX_PANEL_ID": "panel-only"}, clear=True):
+            auto_capture_terminal(cb3)
+        self.assertNotEqual(
+            cb3.get("type"), "cmux",
+            "partial cmux env (panel-id alias only, no workspace) must NOT trigger cmux mode"
+        )
+
+        # Case 4: surface-only with GHOSTTY_TERMINAL_ID present — must fall
+        # through cleanly to ghostty (not get stuck on partial cmux).
+        cb4 = {}
+        with patch.dict(
+            os.environ,
+            {"CMUX_SURFACE_ID": "sf-stray", "GHOSTTY_TERMINAL_ID": "ghostty-fallthrough"},
+            clear=True,
+        ):
+            auto_capture_terminal(cb4)
+        self.assertEqual(
+            cb4.get("type"), "ghostty",
+            "stale CMUX_SURFACE_ID without workspace must fall through to ghostty"
+        )
+        self.assertEqual(cb4.get("terminal_id"), "ghostty-fallthrough")
+
+        # Case 5: workspace-only with WEZTERM_PANE present — must fall
+        # through to wezterm.
+        cb5 = {}
+        with patch.dict(
+            os.environ,
+            {"CMUX_WORKSPACE_ID": "ws-stray", "WEZTERM_PANE": "42"},
+            clear=True,
+        ):
+            auto_capture_terminal(cb5)
+        self.assertEqual(
+            cb5.get("type"), "wezterm",
+            "stale CMUX_WORKSPACE_ID without surface must fall through to wezterm"
+        )
+        self.assertEqual(cb5.get("pane_id"), 42)
+
+        # Case 6: BOTH present — happy path still works (regression guard).
+        cb6 = {}
+        with patch.dict(
+            os.environ,
+            {"CMUX_WORKSPACE_ID": "ws-both", "CMUX_SURFACE_ID": "sf-both"},
+            clear=True,
+        ):
+            auto_capture_terminal(cb6)
+        self.assertEqual(cb6.get("type"), "cmux")
+        self.assertEqual(cb6.get("workspace_id"), "ws-both")
+        self.assertEqual(cb6.get("surface_id"), "sf-both")
+
 
 class CloneTimerTests(unittest.TestCase):
     def test_clone_creates_copy_with_new_id(self):
