@@ -55,10 +55,16 @@ def auto_capture_terminal(callback: dict) -> None:
     ghostty_id = os.environ.get("GHOSTTY_TERMINAL_ID")
     wezterm_pane = os.environ.get("WEZTERM_PANE")
 
-    if cmux_surface:
+    # CC-95 HIGH#5: require BOTH CMUX_WORKSPACE_ID and CMUX_SURFACE_ID/CMUX_PANEL_ID
+    # before auto-detecting cmux. Partial env (only one of the two) falls through to
+    # ghostty/wezterm detection rather than producing a half-populated cmux callback
+    # that fails timer_store validation at create time. Stale env carryover from a
+    # parent process (e.g. CMUX_SURFACE_ID leaked into a non-cmux subshell) must not
+    # misclassify the terminal.
+    if cmux_workspace and cmux_surface:
         callback.setdefault("type", "cmux")
         if callback.get("type") == "cmux":
-            if callback.get("workspace_id") is None and cmux_workspace:
+            if callback.get("workspace_id") is None:
                 callback["workspace_id"] = cmux_workspace
             if callback.get("surface_id") is None:
                 callback["surface_id"] = cmux_surface
