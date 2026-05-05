@@ -929,7 +929,16 @@ class WakeLiteService:
         if session_id:
             signal_file = signal_dir / f"{session_id}.{run_id}.wakelite-callback.json"
         else:
-            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(timer_id or "unknown")).strip("._")[:80] or "unknown"
+            # Task #6 polish: re-rstrip after the [:80] truncation. The earlier
+            # `.strip("._")` removed leading/trailing separators on the
+            # already-substituted string, but slicing to 80 chars can leave a
+            # `.` or `_` at position 79 — e.g. `"x"*79 + "_x"` slices to
+            # `"x"*79 + "_"`, which produces a filename with a trailing
+            # underscore that some downstream tooling interprets as an
+            # incomplete name. The post-slice rstrip + `or "unknown"` re-applied
+            # at the end together guarantee the slug is stable AND non-empty.
+            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(timer_id or "unknown")).strip("._")
+            slug = slug[:80].rstrip("._") or "unknown"
             signal_file = signal_dir / f"_no-session.{slug}.{run_id}.wakelite-callback.json"
 
         signal_data = {
@@ -1002,6 +1011,25 @@ class WakeLiteService:
                 run_id,
                 exc,
             )
+            # Task #6 polish: surface the recovery-write failure as an
+            # incident so it appears in the dashboard / oncall view, not
+            # just in the runner log. add_incident is best-effort — if
+            # state.db is itself unwritable (typical reason for a recovery
+            # write to fail too), the secondary failure is silently
+            # swallowed so we don't shadow the original error.
+            try:
+                self.state.add_incident(
+                    "warn",
+                    "callback_recovery_write_failed",
+                    f"cmux callback recovery signal write failed for run {run_id}: {exc}",
+                    timer_id=timer_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort; original error already logged above
+                logger.exception(
+                    "Failed to record incident for recovery-write failure on timer %s run %s",
+                    timer_id,
+                    run_id,
+                )
 
         if session_id:
             trigger = f"[WakeLite: {timer_name} completed ({status})]"

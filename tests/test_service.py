@@ -1497,11 +1497,21 @@ class CmuxCallbackTests(unittest.TestCase):
             missing = str(Path(td) / "missing-cmux")
             timer = _cmux_callback_timer("cmux-missing-cli", cli_path=missing)
 
-            with self.assertLogs("wakelite.service", level="ERROR") as logs:
+            # Task #6 polish: pin subprocess.run so the test can't accidentally
+            # depend on a real cmux binary on PATH bleeding through. The
+            # missing-CLI path should NEVER reach subprocess.run because the
+            # early-return triggers on the cli_path os.path.isfile check; this
+            # mock asserts that contract by failing loudly if the early-return
+            # is bypassed.
+            with patch("wakelite.service.subprocess.run", side_effect=AssertionError(
+                "subprocess.run must not be called when cli_path is missing"
+            )) as mock_run, \
+                 self.assertLogs("wakelite.service", level="ERROR") as logs:
                 svc._execute_callback(timer, "success", 0, "run-cmux-4", _stdout_file(td), 1.0)
 
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
             self.assertIn("cmux CLI not found", "\n".join(logs.output))
+            mock_run.assert_not_called()
 
     def test_cmux_callback_writes_recovery_signal_when_session_id_missing(self):
         """CC-95 HIGH#4: a cmux-callback timer with no `session_id` must still
@@ -1558,47 +1568,131 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertIn("_no-session.", log_text)
 
     def test_cmux_callback_recovery_slug_sanitizes_hostile_timer_id(self):
-        with tempfile.TemporaryDirectory() as td:
-            WakeLiteService = _bootstrap(td)
-            svc = WakeLiteService(tick_seconds=1)
-            missing = str(Path(td) / "missing-cmux")
-            timer = _basic_timer("cmux-hostile-id", "echo hi")
-            timer["id"] = "../etc\x00 a:b\nfoo"
-            timer["callback"] = {
-                "type": "cmux",
-                "workspace_id": "ws-hostile",
-                "surface_id": "sf-hostile",
-                "session_id": None,
-                "cli_path": missing,
-            }
+        """Task #6 polish: table-driven over multiple hostile inputs to exercise
+        each substitution + strip + truncation rule independently. A single
+        sample (the original test's input) only happens to cover three of the
+        five rules; widening the matrix prevents regressions where one rule
+        weakens silently.
 
-            with self.assertLogs("wakelite.service", level="INFO"):
-                svc._execute_callback(
-                    timer, "success", 0, "run-cmux-hostile", _stdout_file(td), 1.0
-                )
+        Cases cover:
+        - Path-traversal + control chars + spaces + colons + newlines
+        - Pure path-separator-only id
+        - Empty string after substitution + strip (must collapse to "unknown")
+        - Whitespace-only id (same fallback)
+        - Long id that triggers the [:80] truncation
+        - Long id whose 80th char is a separator (Task #6 finding #1: must
+          re-rstrip after truncation so the slug never ends in `.` or `_`)
+        """
+        cases = [
+            {
+                "name": "mixed-hostile-chars",
+                "timer_id": "../etc\x00 a:b\nfoo",
+                "expect_slug_re": r"^[A-Za-z0-9_.-]+$",
+                "expect_unknown": False,
+                "expect_max_len": 80,
+            },
+            {
+                "name": "slashes-only",
+                "timer_id": "//\\\\//",
+                "expect_slug_re": r"^(unknown|[A-Za-z0-9_.-]+)$",
+                "expect_unknown": True,  # collapses to "unknown" after strip
+                "expect_max_len": 80,
+            },
+            {
+                "name": "whitespace-only",
+                "timer_id": "   \t  \n  ",
+                "expect_slug_re": r"^(unknown|[A-Za-z0-9_.-]+)$",
+                "expect_unknown": True,
+                "expect_max_len": 80,
+            },
+            {
+                "name": "empty-string",
+                "timer_id": "",
+                "expect_slug_re": r"^unknown$",
+                "expect_unknown": True,
+                "expect_max_len": 80,
+            },
+            {
+                "name": "long-id-truncates",
+                "timer_id": "x" * 200,
+                "expect_slug_re": r"^x{80}$",
+                "expect_unknown": False,
+                "expect_max_len": 80,
+            },
+            {
+                "name": "long-id-with-separator-at-truncation-boundary",
+                # 79 'x' + '_' + 50 'y' -> after substitute: same; after first
+                # strip("._"): same (separator is not at edges); after [:80]:
+                # 79 'x' + '_'. Without the post-slice rstrip, the slug ends
+                # in '_'. With it, the slug should be 79 'x' (or "unknown" if
+                # rstripping removed everything, which it shouldn't here).
+                "timer_id": "x" * 79 + "_" + "y" * 50,
+                "expect_slug_re": r"^x+$",
+                "expect_unknown": False,
+                "expect_max_len": 79,
+                "must_not_endswith": ("_", "."),
+            },
+            {
+                "name": "long-id-with-dot-at-truncation-boundary",
+                "timer_id": "x" * 79 + "." + "y" * 50,
+                "expect_slug_re": r"^x+$",
+                "expect_unknown": False,
+                "expect_max_len": 79,
+                "must_not_endswith": ("_", "."),
+            },
+        ]
 
-            signal_dir = Path(td) / ".claude" / "session-signals"
-            recovery = list(signal_dir.glob("_no-session.*.wakelite-callback.json"))
-            self.assertEqual(len(recovery), 1)
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                with tempfile.TemporaryDirectory() as td:
+                    WakeLiteService = _bootstrap(td)
+                    svc = WakeLiteService(tick_seconds=1)
+                    missing = str(Path(td) / "missing-cmux")
+                    timer = _basic_timer(f"cmux-hostile-{case['name']}", "echo hi")
+                    timer["id"] = case["timer_id"]
+                    timer["callback"] = {
+                        "type": "cmux",
+                        "workspace_id": "ws-hostile",
+                        "surface_id": "sf-hostile",
+                        "session_id": None,
+                        "cli_path": missing,
+                    }
+                    run_id = f"run-cmux-{case['name']}"
 
-            filename = recovery[0].name
-            self.assertRegex(
-                filename,
-                r"^_no-session\.[A-Za-z0-9_.-]+\..*\.wakelite-callback\.json$",
-            )
-            prefix = "_no-session."
-            suffix = ".run-cmux-hostile.wakelite-callback.json"
-            self.assertTrue(filename.startswith(prefix))
-            self.assertTrue(filename.endswith(suffix))
-            slug = filename[len(prefix):-len(suffix)]
-            for unsafe in ("/", "\\", " ", "\x00", "\n", "..", ":"):
-                self.assertNotIn(unsafe, slug)
-            self.assertLessEqual(len(slug), 80)
+                    with self.assertLogs("wakelite.service", level="INFO"):
+                        svc._execute_callback(
+                            timer, "success", 0, run_id, _stdout_file(td), 1.0
+                        )
 
-            payload = json.loads(recovery[0].read_text())
-            self.assertEqual(payload["timer_name"], "cmux-hostile-id")
-            self.assertEqual(payload["status"], "success")
-            self.assertEqual(payload["run_id"], "run-cmux-hostile")
+                    signal_dir = Path(td) / ".claude" / "session-signals"
+                    suffix = f".{run_id}.wakelite-callback.json"
+                    recovery = [
+                        p for p in signal_dir.glob(f"_no-session.*{suffix}")
+                    ]
+                    self.assertEqual(len(recovery), 1, f"expected 1 recovery file, got {len(recovery)}")
+
+                    filename = recovery[0].name
+                    self.assertTrue(filename.startswith("_no-session."))
+                    self.assertTrue(filename.endswith(suffix))
+                    prefix = "_no-session."
+                    slug = filename[len(prefix):-len(suffix)]
+
+                    self.assertRegex(slug, case["expect_slug_re"])
+                    if case["expect_unknown"]:
+                        self.assertEqual(slug, "unknown")
+                    self.assertLessEqual(len(slug), case["expect_max_len"])
+                    for unsafe in ("/", "\\", " ", "\x00", "\n", "\t", "..", ":"):
+                        self.assertNotIn(unsafe, slug)
+                    for end in case.get("must_not_endswith", ()):
+                        self.assertFalse(
+                            slug.endswith(end),
+                            f"slug {slug!r} must not end with {end!r} after [:80] truncation",
+                        )
+
+                    payload = json.loads(recovery[0].read_text())
+                    self.assertEqual(payload["timer_name"], f"cmux-hostile-{case['name']}")
+                    self.assertEqual(payload["status"], "success")
+                    self.assertEqual(payload["run_id"], run_id)
 
     def test_cmux_callback_writes_recovery_signal_when_session_id_missing_and_workspace_id_missing(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1708,6 +1802,73 @@ class CmuxCallbackTests(unittest.TestCase):
                 if call.args and call.args[0][1] == "send"
             ]
             self.assertTrue(send_calls)
+
+            # Task #6 polish: failure must surface as an incident row, not
+            # only in the runner log. The incident type pins the failure
+            # category so an oncall query can find it.
+            incidents = svc.state.list_incidents(limit=10, include_acked=True)
+            recovery_incidents = [
+                i for i in incidents if i.get("type") == "callback_recovery_write_failed"
+            ]
+            self.assertEqual(len(recovery_incidents), 1, f"expected 1 incident, got: {incidents}")
+            inc = recovery_incidents[0]
+            self.assertEqual(inc.get("severity"), "warn")
+            # _cmux_callback_timer dicts may or may not carry an id field;
+            # the service falls back to "unknown" via timer.get("id", "unknown")
+            # when absent. Mirror that here so the assertion stays robust.
+            self.assertEqual(inc.get("timer_id"), timer.get("id", "unknown"))
+            self.assertIn("disk full", inc.get("message", ""))
+
+    def test_cmux_callback_recovery_write_failure_logs_error_and_continues_no_session(self):
+        """Task #6 polish: cover the non-session-bound path of the
+        recovery-write-failure handler. The session-bound path is exercised by
+        the test above, but the no-session path produces a synthetic
+        `_no-session.<slug>.<run_id>` filename — a different code path that
+        could regress independently. Both paths must (a) keep the runner
+        going, (b) log the ERROR, (c) record an incident."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            timer = _basic_timer("cmux-recovery-no-session", "echo hi")
+            timer["callback"] = {
+                "type": "cmux",
+                "workspace_id": "ws-no-sess",
+                "surface_id": "sf-no-sess",
+                "cli_path": cmux,
+                # No session_id — recovery-file path uses synthetic naming.
+            }
+
+            with patch.object(svc, "_write_callback_signal", side_effect=OSError("permission denied")), \
+                 patch("wakelite.service.subprocess.run") as mock_run, \
+                 self.assertLogs("wakelite.service", level="ERROR") as logs:
+                mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+                svc._execute_callback(
+                    timer, "success", 0, "run-cmux-no-sess-write-fails", _stdout_file(td), 1.0
+                )
+
+            log_text = "\n".join(logs.output)
+            self.assertIn("Recovery signal write failed for timer", log_text)
+            self.assertIn("permission denied", log_text)
+
+            # Even with the recovery write failing, downstream cmux delivery
+            # still proceeds — the runner does NOT abort.
+            send_calls = [
+                call.args[0]
+                for call in mock_run.call_args_list
+                if call.args and call.args[0][1] == "send"
+            ]
+            self.assertTrue(send_calls, "cmux send must still be attempted after recovery-write failure")
+
+            # Incident recorded; timer_id mirrors the service's
+            # `timer.get("id", "unknown")` fallback when no explicit id is set.
+            incidents = svc.state.list_incidents(limit=10, include_acked=True)
+            recovery_incidents = [
+                i for i in incidents if i.get("type") == "callback_recovery_write_failed"
+            ]
+            self.assertEqual(len(recovery_incidents), 1)
+            self.assertEqual(recovery_incidents[0].get("timer_id"), timer.get("id", "unknown"))
+            self.assertIn("permission denied", recovery_incidents[0].get("message", ""))
 
     def test_cmux_new_workspace_fallback_polls_for_tty_ready(self):
         with tempfile.TemporaryDirectory() as td:
