@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Tuple
 from unittest.mock import patch
@@ -350,6 +351,79 @@ class IntervalTimerTests(unittest.TestCase):
 
 
 class DaemonTimerTests(unittest.TestCase):
+    def test_process_daemons_clears_ghost_run_with_correct_finish_run_signature(self):
+        """Ghost cleanup must not raise when closing a dead daemon run."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "daemon-ghost",
+                "comment": "Synthetic ghost daemon",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 999"},
+            })
+            scheduled_at = "2026-05-14T10:00:00"
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+            run_id = run["run_id"]
+            svc.state.set_runtime_running(timer["id"], run_id, scheduled_at, pid=999999)
+
+            with patch.object(svc, "_spawn_run") as mock_spawn:
+                svc._process_daemons(datetime.now())
+
+            finished = svc.state.get_run(run_id)
+            self.assertEqual(finished["status"], "failed")
+            self.assertIn("ghost run", finished["message"])
+            self.assertFalse(svc.state.get_runtime(timer["id"]).is_running)
+            mock_spawn.assert_called_once()
+
+    def test_is_daemon_process_alive_uses_spawn_grace_for_young_pidless_run(self):
+        """A submitted daemon run without a PID is alive during the spawn grace window."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "daemon-spawning",
+                "comment": "Synthetic daemon still being spawned",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 999"},
+            })
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+            run_id = run["run_id"]
+            svc.state.set_runtime_running(timer["id"], run_id, scheduled_at)
+
+            self.assertTrue(svc._is_daemon_process_alive(timer["id"], run_id))
+
+            old = (datetime.now(timezone.utc) - timedelta(seconds=svc.DAEMON_SPAWN_GRACE_SECONDS + 5)).isoformat()
+            with svc.state._connect() as conn:
+                conn.execute(
+                    "UPDATE run_history SET started_at = ?, created_at = ? WHERE run_id = ?",
+                    (old, old, run_id),
+                )
+                conn.execute("UPDATE active_runs SET started_at = ? WHERE run_id = ?", (old, run_id))
+
+            self.assertFalse(svc._is_daemon_process_alive(timer["id"], run_id))
+
     def test_daemon_restarts_on_failure(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)

@@ -1717,15 +1717,19 @@ end tell'''],
         callback = timer.get("callback") or {}
         session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
         if not session_bound:
-            timer_name = timer.get("name", timer_id)
-            slack_thread_ts = self.notifier.get_daily_thread_ts()
-            if slack_thread_ts:
-                self.notifier.notify_slack(
-                    f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
-                    f"Run: `{run_id}`\n"
-                    f"Scheduled: {scheduled_at}",
-                    thread_ts=slack_thread_ts,
-                )
+            try:
+                timer_name = timer.get("name", timer_id)
+                slack_thread_ts = self.notifier.get_daily_thread_ts()
+                if slack_thread_ts:
+                    self.notifier.notify_slack(
+                        f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
+                        f"Run: `{run_id}`\n"
+                        f"Scheduled: {scheduled_at}",
+                        thread_ts=slack_thread_ts,
+                    )
+            except Exception:
+                slack_thread_ts = None
+                logger.warning("Slack thread setup failed for timer %s; continuing", timer_id, exc_info=True)
 
         date_dir = datetime.now().strftime("%Y-%m-%d")
         run_dir = LOG_DIR / timer_id / date_dir
@@ -1969,6 +1973,11 @@ end tell'''],
                 retry_of_run_id=None,
             )
 
+    # Tolerance window between _spawn_run submitting to the executor and the
+    # worker thread actually registering a PID. Without this, a busy runner can
+    # race its own daemon spawn and clear the runtime row before Popen happens.
+    DAEMON_SPAWN_GRACE_SECONDS = 30
+
     def _is_daemon_process_alive(self, timer_id: str, run_id: Optional[str]) -> bool:
         """Check if the daemon process is actually alive via in-memory dict or OS PID check."""
         if run_id and run_id in self._active_processes:
@@ -1985,7 +1994,20 @@ end tell'''],
                     return False
                 except PermissionError:
                     return True  # process exists but we can't signal it
-        return False  # no run_id or no PID — ghost
+            run = self.state.get_run(run_id)
+            if run:
+                started_iso = run.get("started_at") or run.get("created_at")
+                if started_iso:
+                    try:
+                        started_at = datetime.fromisoformat(str(started_iso).replace("Z", "+00:00"))
+                        if started_at.tzinfo is None:
+                            started_at = started_at.replace(tzinfo=timezone.utc)
+                        age = (datetime.now(timezone.utc) - started_at).total_seconds()
+                        if age < self.DAEMON_SPAWN_GRACE_SECONDS:
+                            return True
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+        return False  # no run_id, no PID, or grace window exceeded — ghost
 
     def _process_daemons(self, now: datetime) -> None:
         """Fast-tick: ensure daemon timers are running; restart if crashed."""
@@ -2004,7 +2026,17 @@ end tell'''],
                 if not self._is_daemon_process_alive(timer_id, runtime.running_run_id):
                     logger.warning("Daemon %s has ghost run %s — clearing stale state", timer_id, runtime.running_run_id)
                     if runtime.running_run_id:
-                        self.state.finish_run(runtime.running_run_id, "failed", -1, "ghost run: process not alive")
+                        run = self.state.get_run(runtime.running_run_id) or {}
+                        self.state.finish_run(
+                            run_id=runtime.running_run_id,
+                            timer_id=timer_id,
+                            scheduled_at=run.get("scheduled_at") or self.state._now(),
+                            status="failed",
+                            exit_code=-1,
+                            message="ghost run: process not alive",
+                            stdout_path=None,
+                            stderr_path=None,
+                        )
                     self.state.set_runtime_idle(timer_id, runtime.running_run_id)
                     runtime = self.state.get_runtime(timer_id)
                     # Fall through to restart logic below
