@@ -47,8 +47,8 @@ def ensure_dirs() -> None:
 def auto_capture_terminal(callback: dict) -> None:
     """Auto-detect terminal type and ID from environment, mutating callback in-place.
 
-    Checks cmux first, then $GHOSTTY_TERMINAL_ID, then $WEZTERM_PANE.
-    Sets callback.type and the appropriate ID field if not already set.
+    Checks cmux first, then $GHOSTTY_TERMINAL_ID, then $WEZTERM_PANE unless
+    callback.type is already set. Sets the appropriate ID field if not already set.
     """
     if callback is None or not isinstance(callback, dict):
         return
@@ -77,33 +77,50 @@ def auto_capture_terminal(callback: dict) -> None:
             cmux_surface,
         )
 
-    if cmux_workspace and cmux_surface:
-        callback.setdefault("type", "cmux")
-        if callback.get("type") == "cmux":
-            if callback.get("workspace_id") is None:
-                callback["workspace_id"] = cmux_workspace
-            if callback.get("surface_id") is None:
-                callback["surface_id"] = cmux_surface
-            if callback.get("socket_path") is None and os.environ.get("CMUX_SOCKET_PATH"):
-                callback["socket_path"] = os.environ["CMUX_SOCKET_PATH"]
-            if callback.get("cli_path") is None:
-                for candidate in (
-                    os.environ.get("CMUX_BUNDLED_CLI_PATH"),
-                    "/opt/homebrew/bin/cmux",
-                    "/usr/local/bin/cmux",
-                    "/Applications/cmux.app/Contents/Resources/bin/cmux",
-                ):
-                    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                        callback["cli_path"] = candidate
-                        break
-    elif ghostty_id:
-        callback.setdefault("type", "ghostty")
-        if callback.get("type") == "ghostty" and callback.get("terminal_id") is None:
+    def capture_cmux() -> None:
+        if not (cmux_workspace and cmux_surface):
+            return
+        if callback.get("workspace_id") is None:
+            callback["workspace_id"] = cmux_workspace
+        if callback.get("surface_id") is None:
+            callback["surface_id"] = cmux_surface
+        if callback.get("socket_path") is None and os.environ.get("CMUX_SOCKET_PATH"):
+            callback["socket_path"] = os.environ["CMUX_SOCKET_PATH"]
+        if callback.get("cli_path") is None:
+            for candidate in (
+                os.environ.get("CMUX_BUNDLED_CLI_PATH"),
+                "/opt/homebrew/bin/cmux",
+                "/usr/local/bin/cmux",
+                "/Applications/cmux.app/Contents/Resources/bin/cmux",
+            ):
+                if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    callback["cli_path"] = candidate
+                    break
+
+    def capture_ghostty() -> None:
+        if ghostty_id and callback.get("terminal_id") is None:
             callback["terminal_id"] = ghostty_id
-    elif wezterm_pane:
-        callback.setdefault("type", "wezterm")
-        if callback.get("type") == "wezterm" and callback.get("pane_id") is None:
+
+    def capture_wezterm() -> None:
+        if wezterm_pane and callback.get("pane_id") is None:
             try:
                 callback["pane_id"] = int(wezterm_pane)
             except (ValueError, TypeError):
                 pass
+
+    requested_type = callback.get("type")
+    if requested_type == "cmux":
+        capture_cmux()
+    elif requested_type == "ghostty":
+        capture_ghostty()
+    elif requested_type == "wezterm":
+        capture_wezterm()
+    elif cmux_workspace and cmux_surface:
+        callback["type"] = "cmux"
+        capture_cmux()
+    elif ghostty_id:
+        callback["type"] = "ghostty"
+        capture_ghostty()
+    elif wezterm_pane:
+        callback["type"] = "wezterm"
+        capture_wezterm()

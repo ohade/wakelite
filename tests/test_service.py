@@ -2349,7 +2349,7 @@ class AutoCaptureTerminalTests(unittest.TestCase):
     def test_ghostty_takes_precedence(self):
         from wakelite.config import auto_capture_terminal
         cb = {}
-        with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "uuid-456", "WEZTERM_PANE": "99"}, clear=False):
+        with patch.dict(os.environ, {"GHOSTTY_TERMINAL_ID": "uuid-456", "WEZTERM_PANE": "99"}, clear=True):
             auto_capture_terminal(cb)
         self.assertEqual(cb.get("type"), "ghostty")
         self.assertEqual(cb.get("terminal_id"), "uuid-456")
