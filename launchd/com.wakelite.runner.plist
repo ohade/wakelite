@@ -7,7 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/<user>/git/playground/wakelite/bin/wakelite-runner</string>
+    <string>/path/to/wakelite/bin/wakelite-runner</string>
     <string>--with-mcp-http</string>
   </array>
 
@@ -20,7 +20,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/<user></string>
+    <string>/path/to/home</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>PYTHONDONTWRITEBYTECODE</key>
@@ -28,8 +28,8 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/<user>/.wakelite/logs/runner.launchd.out.log</string>
+  <string>/path/to/home/.wakelite/logs/runner.launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/<user>/.wakelite/logs/runner.launchd.err.log</string>
+  <string>/path/to/home/.wakelite/logs/runner.launchd.err.log</string>
 </dict>
 </plist>

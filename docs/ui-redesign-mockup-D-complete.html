@@ -363,11 +363,11 @@
         <div class="form-group"><label class="form-label">Frequency</label><select class="form-select"><option>Daily</option><option selected>Weekly</option><option>Monthly</option><option>One-Off</option><option>Interval</option></select></div>
         <div class="form-group"><label class="form-label">Run Time</label><input class="form-input" type="time" value="01:55"></div>
         <div class="form-group"><label class="form-label">Wake Lead (min)</label><input class="form-input" type="number" min="0" max="240" value="2"></div>
-        <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" value="/Users/<user>/git"></div>
+        <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" value="/Users/example/git"></div>
 
         <div class="form-group full">
           <label class="form-label">Shell Command</label>
-          <input class="form-input" type="text" value="/Users/<user>/.claude/skills/claudeception/scripts/daily-batch.sh" style="font-family:var(--font-mono); font-size:12px;">
+          <input class="form-input" type="text" value="/Users/example/.claude/skills/claudeception/scripts/daily-batch.sh" style="font-family:var(--font-mono); font-size:12px;">
           <div class="form-hint">Use <code style="background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px; font-size:11px;">:</code> for wake-only no-op.</div>
         </div>
 
@@ -461,8 +461,8 @@
           <div class="detail-meta-label" style="margin-bottom:12px;">Command</div>
           <div style="display:grid; gap:10px;">
             <div style="display:flex; justify-content:space-between;"><span style="font-size:12px; color:var(--text-tertiary);">Mode</span><span style="font-size:13px;">shell</span></div>
-            <div><div style="font-size:12px; color:var(--text-tertiary); margin-bottom:4px;">Shell</div><div style="font-family:var(--font-mono); font-size:11px; color:var(--text-secondary); background:rgba(0,0,0,0.2); padding:8px 10px; border-radius:6px; border:1px solid rgba(255,255,255,0.04); word-break:break-all;">/Users/<user>/git/playground/slack-claude-code-local-agent/bin/slack-agent</div></div>
-            <div style="display:flex; justify-content:space-between;"><span style="font-size:12px; color:var(--text-tertiary);">Working Dir</span><span style="font-size:12px; font-family:var(--font-mono); color:var(--text-secondary);">/Users/<user>/git</span></div>
+            <div><div style="font-size:12px; color:var(--text-tertiary); margin-bottom:4px;">Shell</div><div style="font-family:var(--font-mono); font-size:11px; color:var(--text-secondary); background:rgba(0,0,0,0.2); padding:8px 10px; border-radius:6px; border:1px solid rgba(255,255,255,0.04); word-break:break-all;">/Users/example/git/playground/slack-claude-code-local-agent/bin/slack-agent</div></div>
+            <div style="display:flex; justify-content:space-between;"><span style="font-size:12px; color:var(--text-tertiary);">Working Dir</span><span style="font-size:12px; font-family:var(--font-mono); color:var(--text-secondary);">/Users/example/git</span></div>
           </div>
         </div>
         <!-- Execution -->
@@ -519,8 +519,8 @@
           <div class="form-group"><label class="form-label">Overlap Policy</label><select class="form-select"><option selected>skip</option><option>queue</option><option>allow</option></select></div>
           <div class="form-divider"></div>
           <div class="form-group"><label class="form-label">Command Mode</label><select class="form-select"><option selected>Shell</option><option>Exec</option></select></div>
-          <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" value="/Users/<user>/git"></div>
-          <div class="form-group full"><label class="form-label">Shell Command</label><input class="form-input" type="text" value="/Users/<user>/git/playground/slack-claude-code-local-agent/bin/slack-agent" style="font-family:var(--font-mono); font-size:12px;"></div>
+          <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" value="/Users/example/git"></div>
+          <div class="form-group full"><label class="form-label">Shell Command</label><input class="form-input" type="text" value="/Users/example/git/playground/slack-claude-code-local-agent/bin/slack-agent" style="font-family:var(--font-mono); font-size:12px;"></div>
           <div class="form-divider"></div>
           <div class="form-group"><label class="form-label">Wake Lead (min)</label><input class="form-input" type="number" value="0"></div>
           <div class="form-group"><label class="form-label">Restart Delay (sec)</label><input class="form-input" type="number" value="10"></div>
@@ -593,7 +593,7 @@
 <span class="li">[01:55:02] Scanning sessions from 2026-03-09 to 2026-03-16...</span>
 <span class="ld">[01:55:03] Found 23 sessions (14 with extractable content)</span>
 <span class="ld">[01:55:03] Scoring session 2b8e3539... (wakelite work)</span>
-<span class="ld">[01:55:08] Scoring session a91f4c02... (TICKET-000 demo)</span>
+<span class="ld">[01:55:08] Scoring session a91f4c02... (TASK-123 ad-refresh)</span>
 <span class="ld">[01:55:14] Scoring session c7d20e1f... (tidy-tabs extension)</span>
 <span class="ld">[01:55:19] Scoring session f38b1a90... (skill-optimizer audit)</span>
 <span class="li">[01:55:25] Pre-filter complete: 6 candidates above threshold (score > 0.7)</span>

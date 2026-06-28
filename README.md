@@ -115,3 +115,7 @@ PYTHONPATH=. python -m pytest tests/ -v
 - macOS (tested on Apple Silicon)
 - Python 3.9+
 - Optional: `rumps` for menu bar app
+
+## License
+
+MIT. See [LICENSE](LICENSE).

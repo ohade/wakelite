@@ -257,7 +257,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           </div>
                           <div>
                             <label for="cwd">Working Directory</label>
-                            <input id="cwd" type="text" value="/Users/<user>/git" />
+                            <input id="cwd" type="text" value="~/git" />
                           </div>
                           <div class="full">
                             <label for="shell">Shell Command (`:` means wake-only no-op)</label>
@@ -779,7 +779,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             command: {
                               mode: 'shell',
                               shell,
-                              workingDirectory: cwd || '/Users/<user>'
+                              workingDirectory: cwd || '/Users/example'
                             },
                             wake: isInterval ? { enabled: false, action: 'wake', leadMinutes: 0 } : {
                               enabled: wakeEnabled,
@@ -837,7 +837,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           el('editShell').value = command.shell || '';
                           el('editExecutable').value = command.executable || '';
                           el('editArgs').value = Array.isArray(command.args) ? command.args.join(' ') : '';
-                          el('editWorkingDirectory').value = command.workingDirectory || '/Users/<user>';
+                          el('editWorkingDirectory').value = command.workingDirectory || '/Users/example';
 
                           const wake = timer.wake || {};
                           el('editWakeEnabled').checked = Boolean(wake.enabled);
@@ -866,7 +866,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                               shell: mode === 'shell' ? (el('editShell').value || ':').trim() : undefined,
                               executable: mode === 'exec' ? (el('editExecutable').value || '').trim() : undefined,
                               args: mode === 'exec' ? (args ? args.split(/\\s+/) : []) : undefined,
-                              workingDirectory: (el('editWorkingDirectory').value || '/Users/<user>').trim(),
+                              workingDirectory: (el('editWorkingDirectory').value || '/Users/example').trim(),
                             },
                             wake: {
                               enabled: el('editWakeEnabled').checked,

@@ -441,7 +441,7 @@
           <input class="form-input" type="text" id="createShell" placeholder="e.g. /path/to/script.sh" style="font-family:var(--font-mono); font-size:12px;">
           <div class="form-hint">Use <code style="background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px; font-size:11px;">:</code> for wake-only no-op.</div>
         </div>
-        <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" id="createCwd" value="/Users/<user>"></div>
+        <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" id="createCwd" value="/Users/example"></div>
         <div class="form-group"><label class="form-label">Wake Lead (min)</label><input class="form-input" type="number" id="createLead" min="0" max="240" value="0"></div>
 
         <div class="form-divider"></div>
@@ -575,7 +575,7 @@
           <div class="form-group"><label class="form-label">Command Mode</label>
             <select class="form-select" id="editCommandMode"><option value="shell">Shell</option><option value="exec">Exec</option></select>
           </div>
-          <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" id="editWorkingDirectory" value="/Users/<user>"></div>
+          <div class="form-group"><label class="form-label">Working Directory</label><input class="form-input" type="text" id="editWorkingDirectory" value="/Users/example"></div>
           <div class="form-group full" id="editShellWrap"><label class="form-label">Shell Command</label><input class="form-input" type="text" id="editShell" style="font-family:var(--font-mono); font-size:12px;"></div>
           <div class="form-group hidden" id="editExecWrap"><label class="form-label">Executable</label><input class="form-input" type="text" id="editExecutable"></div>
           <div class="form-group hidden" id="editArgsWrap"><label class="form-label">Arguments</label><input class="form-input" type="text" id="editArgs"></div>
@@ -905,7 +905,7 @@ el('createForm').addEventListener('submit', async (event) => {
     name, comment, enabled,
     timezone: 'local',
     recurrence,
-    command: { mode: 'shell', shell, workingDirectory: cwd || '/Users/<user>' },
+    command: { mode: 'shell', shell, workingDirectory: cwd || '/Users/example' },
     wake: isInterval ? { enabled: false, action: 'wake', leadMinutes: 0 } : { enabled: wakeEnabled, action: 'wake', leadMinutes: lead },
     notifications: { onSuccess: notifySuccess, onFailure: notifyFailure },
   };
@@ -987,7 +987,7 @@ function populateEditForm(timer) {
   el('editShell').value = cmd.shell || '';
   el('editExecutable').value = cmd.executable || '';
   el('editArgs').value = Array.isArray(cmd.args) ? cmd.args.join(' ') : '';
-  el('editWorkingDirectory').value = cmd.workingDirectory || '/Users/<user>';
+  el('editWorkingDirectory').value = cmd.workingDirectory || '/Users/example';
   const wake = timer.wake || {};
   el('editWakeEnabled').checked = Boolean(wake.enabled);
   el('editWakeLead').value = Number(wake.leadMinutes || 0);
@@ -1046,7 +1046,7 @@ function editPayloadFromForm() {
       shell: mode === 'shell' ? (el('editShell').value || ':').trim() : undefined,
       executable: mode === 'exec' ? (el('editExecutable').value || '').trim() : undefined,
       args: mode === 'exec' ? (args ? args.split(/\s+/) : []) : undefined,
-      workingDirectory: (el('editWorkingDirectory').value || '/Users/<user>').trim(),
+      workingDirectory: (el('editWorkingDirectory').value || '/Users/example').trim(),
     },
     wake: { enabled: el('editWakeEnabled').checked, action: 'wake', leadMinutes: Number(el('editWakeLead').value || '0') },
     notifications: { onSuccess: el('editNotifySuccess').checked, onFailure: el('editNotifyFailure').checked },

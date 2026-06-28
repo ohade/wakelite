@@ -220,7 +220,7 @@ def _cmd_launchd_install(args: argparse.Namespace) -> None:
     if args.scope in ("system", "both") and os.geteuid() != 0:
         raise RuntimeError(
             "system launchd install requires sudo: "
-            "sudo /Users/<user>/git/playground/wakelite/bin/wakelitectl launchd install --scope system --load"
+            "sudo ./bin/wakelitectl launchd install --scope system --load"
         )
     payload = {}
     if args.scope in ("user", "both"):
@@ -234,7 +234,7 @@ def _cmd_launchd_uninstall(args: argparse.Namespace) -> None:
     if args.scope in ("system", "both") and os.geteuid() != 0:
         raise RuntimeError(
             "system launchd uninstall requires sudo: "
-            "sudo /Users/<user>/git/playground/wakelite/bin/wakelitectl launchd uninstall --scope system --unload"
+            "sudo ./bin/wakelitectl launchd uninstall --scope system --unload"
         )
     payload = {}
     if args.scope in ("user", "both"):

@@ -9,8 +9,8 @@
   },
   "command": {
     "mode": "shell",
-    "shell": "/Users/<user>/.claude/skills/claudeception/scripts/daily-batch.sh",
-    "workingDirectory": "/Users/<user>/git"
+    "shell": "/Users/example/.claude/skills/claudeception/scripts/daily-batch.sh",
+    "workingDirectory": "/Users/example/git"
   },
   "wake": {
     "enabled": true,

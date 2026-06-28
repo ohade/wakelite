@@ -7,7 +7,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/<user>/git/playground/wakelite/bin/wakelite-reconciler</string>
+    <string>/path/to/wakelite/bin/wakelite-reconciler</string>
     <string>--interval</string>
     <string>600</string>
   </array>
@@ -19,8 +19,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/<user>/.wakelite/logs/reconciler.launchd.out.log</string>
+  <string>/path/to/home/.wakelite/logs/reconciler.launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/<user>/.wakelite/logs/reconciler.launchd.err.log</string>
+  <string>/path/to/home/.wakelite/logs/reconciler.launchd.err.log</string>
 </dict>
 </plist>

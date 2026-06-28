@@ -10,7 +10,7 @@
   "command": {
     "mode": "shell",
     "shell": "echo hello from wakelite",
-    "workingDirectory": "/Users/<user>/git"
+    "workingDirectory": "/Users/example/git"
   },
   "wake": {
     "enabled": true,

@@ -10,7 +10,7 @@
   "command": {
     "mode": "shell",
     "shell": "/opt/homebrew/bin/claude -p hello --max-turns 3",
-    "workingDirectory": "/Users/<user>/git"
+    "workingDirectory": "/Users/example/git"
   },
   "wake": {
     "enabled": true,

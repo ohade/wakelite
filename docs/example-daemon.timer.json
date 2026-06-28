@@ -16,7 +16,7 @@
   "command": {
     "mode": "shell",
     "shell": "echo 'daemon started'; sleep 60",
-    "workingDirectory": "/Users/<user>/git"
+    "workingDirectory": "/Users/example/git"
   },
   "wake": {
     "enabled": false,
