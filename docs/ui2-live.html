@@ -455,6 +455,7 @@
         <div class="form-group">
           <div class="form-row"><input class="form-checkbox" type="checkbox" id="createNotifySuccess"><label class="form-checkbox-label" for="createNotifySuccess">Notify On Success</label></div>
           <div class="form-row"><input class="form-checkbox" type="checkbox" id="createNotifyFailure" checked><label class="form-checkbox-label" for="createNotifyFailure">Notify On Failure</label></div>
+          <div class="form-row"><input class="form-checkbox" type="checkbox" id="createSlackActivity" checked><label class="form-checkbox-label" for="createSlackActivity">Post Slack Activity</label></div>
         </div>
 
         <div class="form-actions">
@@ -589,6 +590,7 @@
           <div class="form-group">
             <div class="form-row"><input class="form-checkbox" type="checkbox" id="editNotifySuccess"><label class="form-checkbox-label" for="editNotifySuccess">Notify On Success</label></div>
             <div class="form-row"><input class="form-checkbox" type="checkbox" id="editNotifyFailure" checked><label class="form-checkbox-label" for="editNotifyFailure">Notify On Failure</label></div>
+            <div class="form-row"><input class="form-checkbox" type="checkbox" id="editSlackActivity" checked><label class="form-checkbox-label" for="editSlackActivity">Post Slack Activity</label></div>
           </div>
 
           <div class="form-actions">
@@ -891,6 +893,7 @@ el('createForm').addEventListener('submit', async (event) => {
   const wakeEnabled = el('createWakeEnabled').checked;
   const notifySuccess = el('createNotifySuccess').checked;
   const notifyFailure = el('createNotifyFailure').checked;
+  const slackActivity = el('createSlackActivity').checked;
 
   if (!name) { status.textContent = 'Error: name is required'; status.className = 'form-status error'; return; }
 
@@ -907,7 +910,7 @@ el('createForm').addEventListener('submit', async (event) => {
     recurrence,
     command: { mode: 'shell', shell, workingDirectory: cwd || '/Users/example' },
     wake: isInterval ? { enabled: false, action: 'wake', leadMinutes: 0 } : { enabled: wakeEnabled, action: 'wake', leadMinutes: lead },
-    notifications: { onSuccess: notifySuccess, onFailure: notifyFailure },
+    notifications: { onSuccess: notifySuccess, onFailure: notifyFailure, slackActivity },
   };
   if (isInterval) {
     payload.timer_type = el('createTimerType').value;
@@ -930,6 +933,7 @@ el('createForm').addEventListener('submit', async (event) => {
     el('createForm').reset();
     el('createEnabled').checked = true;
     el('createNotifyFailure').checked = true;
+    el('createSlackActivity').checked = true;
     updateCreateFormVisibility();
     await loadDashboard();
     showView('dashboard');
@@ -994,6 +998,7 @@ function populateEditForm(timer) {
   const notif = timer.notifications || {};
   el('editNotifySuccess').checked = Boolean(notif.onSuccess);
   el('editNotifyFailure').checked = notif.onFailure !== false;
+  el('editSlackActivity').checked = notif.slackActivity !== false;
   updateEditFormVisibility();
   updateEditCommandVisibility();
 }
@@ -1049,7 +1054,11 @@ function editPayloadFromForm() {
       workingDirectory: (el('editWorkingDirectory').value || '/Users/example').trim(),
     },
     wake: { enabled: el('editWakeEnabled').checked, action: 'wake', leadMinutes: Number(el('editWakeLead').value || '0') },
-    notifications: { onSuccess: el('editNotifySuccess').checked, onFailure: el('editNotifyFailure').checked },
+    notifications: {
+      onSuccess: el('editNotifySuccess').checked,
+      onFailure: el('editNotifyFailure').checked,
+      slackActivity: el('editSlackActivity').checked,
+    },
   };
   if (isInterval) {
     result.timer_type = el('editTimerType').value;
@@ -1154,6 +1163,7 @@ function renderDetailReadonly(timer) {
   wn += '<div style="height:1px; background:rgba(255,255,255,0.06);"></div>';
   wn += renderDetailRow('On Success', notif.onSuccess ? 'Yes' : 'No');
   wn += renderDetailRow('On Failure', notif.onFailure !== false ? 'Yes' : 'No');
+  wn += renderDetailRow('Slack Activity', notif.slackActivity !== false ? 'Yes' : 'No');
   if (timer.resources && timer.resources.length) {
     wn += '<div style="height:1px; background:rgba(255,255,255,0.06);"></div>';
     wn += `<div style="font-size:12px; color:var(--text-tertiary); margin-bottom:4px;">Resources</div>`;

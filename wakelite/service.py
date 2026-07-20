@@ -1711,12 +1711,17 @@ end tell'''],
         run_id = run_ctx["run_id"]
         self.state.set_runtime_running(timer_id, run_id, scheduled_at)
 
+        notifications = timer.get("notifications") or {}
+        slack_activity_enabled = notifications.get("slackActivity", True)
+
         # For timers not bound to a specific session, create a Slack thread
         # so all notifications for this run are grouped under one parent.
+        # Existing timers omit slackActivity, so True is the compatibility
+        # default; explicit False makes this entire lifecycle Slack-silent.
         slack_thread_ts: Optional[str] = None
         callback = timer.get("callback") or {}
         session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
-        if not session_bound:
+        if slack_activity_enabled and not session_bound:
             try:
                 timer_name = timer.get("name", timer_id)
                 slack_thread_ts = self.notifier.get_daily_thread_ts()
@@ -1745,7 +1750,6 @@ end tell'''],
         status = "failed"
         exit_code = None
         message = ""
-        notifications = timer.get("notifications", {})
         notify_on_success = bool(notifications.get("onSuccess", False))
         notify_on_failure = bool(notifications.get("onFailure", True))
         run_start_mono = time.monotonic()
@@ -1850,12 +1854,13 @@ end tell'''],
                     "WakeLite: timer completed",
                     f"{timer_name} — {trigger}=delete triggered. Timer auto-deleted.",
                 )
-                self.notifier.notify_slack(
-                    f":wastebasket: Timer auto-deleted: *{timer_name}*\n"
-                    f"Condition: `{trigger}=delete` triggered\n"
-                    f"Exit code: {exit_code}",
-                    thread_ts=slack_thread_ts,
-                )
+                if slack_activity_enabled:
+                    self.notifier.notify_slack(
+                        f":wastebasket: Timer auto-deleted: *{timer_name}*\n"
+                        f"Condition: `{trigger}=delete` triggered\n"
+                        f"Exit code: {exit_code}",
+                        thread_ts=slack_thread_ts,
+                    )
                 self._signal_wake()
                 return
             # Delete failed — fall through to normal post-run processing

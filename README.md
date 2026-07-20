@@ -36,7 +36,7 @@ PYTHONPATH=. ./bin/wakelitectl timer create --file - --idempotency-key my-first-
   "recurrence": {"frequency": "daily", "time": "09:00"},
   "command": {"mode": "shell", "shell": "curl -sf https://example.com/health"},
   "wake": {"enabled": true, "leadMinutes": 2},
-  "notifications": {"onFailure": true}
+  "notifications": {"onFailure": true, "slackActivity": true}
 }
 EOF
 ```

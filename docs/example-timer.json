@@ -19,6 +19,7 @@
   },
   "notifications": {
     "onSuccess": false,
-    "onFailure": true
+    "onFailure": true,
+    "slackActivity": true
   }
 }

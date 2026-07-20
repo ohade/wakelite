@@ -142,8 +142,9 @@ Fires are anchored to `start` and step by `every`. Outside the window, the timer
 |-------|------|---------|-------------|
 | `onSuccess` | bool | `false` | Notify on successful run (exit code 0) |
 | `onFailure` | bool | `true` | Notify on failed run (non-zero exit, excluding 75) |
+| `slackActivity` | bool | `true` | Post the Slack run-start/run-end thread and auto-delete message. Set `false` for local-only monitors. |
 
-Notifications use macOS desktop (`osascript`) and optionally Slack DMs. Desktop notifications are gated by the global mute toggle; Slack is always-on.
+`onSuccess` and `onFailure` control macOS desktop notifications (`osascript`) and are gated by the global mute toggle. Slack activity is enabled by default for backward compatibility, including for existing timers that omit `slackActivity`. Setting it to `false` suppresses Slack lifecycle writes for successful, failed, waiting, and auto-deleted runs. Terminal callback fallback notifications are a separate delivery path.
 
 ### `execution`
 

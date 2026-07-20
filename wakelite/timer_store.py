@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_PAYLOAD_KEYS = {"name", "enabled", "timezone", "recurrence", "command", "wake", "notifications", "comment", "id", "timer_type", "execution", "resources", "max_runs", "until", "callback"}
 ALLOWED_WAKE_KEYS = {"enabled", "action", "leadMinutes"}
+ALLOWED_NOTIFICATION_KEYS = {"onSuccess", "onFailure", "slackActivity"}
 ALLOWED_EXECUTION_KEYS = {"overlap", "max_concurrent", "restart_on_failure", "restart_delay_seconds", "restart_max_backoff_seconds"}
 ALLOWED_OVERLAP_VALUES = {"skip", "queue", "allow"}
 ALLOWED_RESOURCE_KEYS = {"name", "description", "capacity", "estimated_usage"}
@@ -77,12 +78,17 @@ class TimerStore:
         if timer["command"]["mode"] == "exec" and not timer["command"].get("executable"):
             raise ValueError("command.executable is required in exec mode")
         notifications = timer.get("notifications", {})
-        if notifications and not isinstance(notifications, dict):
+        if not isinstance(notifications, dict):
             raise ValueError("notifications must be an object")
-        if "onSuccess" in notifications and not isinstance(notifications["onSuccess"], bool):
-            raise ValueError("notifications.onSuccess must be boolean")
-        if "onFailure" in notifications and not isinstance(notifications["onFailure"], bool):
-            raise ValueError("notifications.onFailure must be boolean")
+        unknown_notifications = set(notifications) - ALLOWED_NOTIFICATION_KEYS
+        if unknown_notifications:
+            raise ValueError(
+                f"Unknown keys in notifications: {unknown_notifications}. "
+                f"Allowed: {', '.join(sorted(ALLOWED_NOTIFICATION_KEYS))}"
+            )
+        for field in ALLOWED_NOTIFICATION_KEYS:
+            if field in notifications and not isinstance(notifications[field], bool):
+                raise ValueError(f"notifications.{field} must be boolean")
 
         timer_type = timer.get("timer_type", "scheduled")
         if timer_type not in ("scheduled", "daemon"):
@@ -234,7 +240,7 @@ class TimerStore:
                 ),
                 "notifications": payload.get(
                     "notifications",
-                    {"onSuccess": False, "onFailure": True},
+                    {"onSuccess": False, "onFailure": True, "slackActivity": True},
                 ),
                 "created_at": payload.get("created_at", now),
                 "updated_at": now,

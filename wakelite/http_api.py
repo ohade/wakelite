@@ -345,6 +345,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           <label class="check"><input id="wakeEnabled" type="checkbox" checked />Program Wake</label>
                           <label class="check"><input id="notifySuccess" type="checkbox" />Notify On Success</label>
                           <label class="check"><input id="notifyFailure" type="checkbox" checked />Notify On Failure</label>
+                          <label class="check"><input id="slackActivity" type="checkbox" checked />Post Slack Activity</label>
                           <div><button type="submit">Create Wakeup</button></div>
                         </form>
                         <pre class="status" id="createStatus"></pre>
@@ -522,6 +523,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                               <label class="check"><input id="editWakeEnabled" type="checkbox" />Program Wake</label>
                               <label class="check"><input id="editNotifySuccess" type="checkbox" />Notify On Success</label>
                               <label class="check"><input id="editNotifyFailure" type="checkbox" />Notify On Failure</label>
+                              <label class="check"><input id="editSlackActivity" type="checkbox" />Post Slack Activity</label>
                             </form>
                           </div>
 
@@ -746,6 +748,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           const wakeEnabled = document.getElementById('wakeEnabled').checked;
                           const notifySuccess = document.getElementById('notifySuccess').checked;
                           const notifyFailure = document.getElementById('notifyFailure').checked;
+                          const slackActivity = document.getElementById('slackActivity').checked;
 
                           if (!name) {
                             status.textContent = 'error: name is required';
@@ -788,7 +791,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                             },
                             notifications: {
                               onSuccess: notifySuccess,
-                              onFailure: notifyFailure
+                              onFailure: notifyFailure,
+                              slackActivity
                             }
                           };
                           if (isInterval) {
@@ -846,6 +850,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           const notifications = timer.notifications || {};
                           el('editNotifySuccess').checked = Boolean(notifications.onSuccess);
                           el('editNotifyFailure').checked = notifications.onFailure !== false;
+                          el('editSlackActivity').checked = notifications.slackActivity !== false;
 
                           updateEditRecurrenceVisibility();
                           updateEditCommandVisibility();
@@ -876,6 +881,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             notifications: {
                               onSuccess: el('editNotifySuccess').checked,
                               onFailure: el('editNotifyFailure').checked,
+                              slackActivity: el('editSlackActivity').checked,
                             },
                           };
                           if (isInterval) {

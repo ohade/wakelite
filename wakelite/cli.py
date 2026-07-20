@@ -355,7 +355,8 @@ def main() -> None:
   },
   "notifications": {                            # optional
     "onSuccess": false,
-    "onFailure": true
+    "onFailure": true,
+    "slackActivity": true                       #   false = no Slack lifecycle thread/messages
   },
   "callback": {                                 # optional — reconnect results to terminal
     "type": "wezterm",                          #   only "wezterm" supported (v1)
