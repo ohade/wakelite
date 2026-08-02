@@ -174,6 +174,7 @@ don't skew the 7-day axis.
 
 ## Key gotchas
 
+- **Shell-mode timers run under `/bin/zsh -lc`; `status` is a read-only zsh special parameter.** Never write `status=$(...)` in a timer command; use a specific name such as `build_status`. Observed 2026-08-02: a long-lived polling timer repeatedly failed with `zsh: read-only variable: status` before reaching its polling logic.
 - **Interval format is single-unit only.** `5h2m` is rejected — use `302m` instead.
 - **`scripts/` is gitignored.** Timer scripts live there but aren't tracked.
 - **Timer JSON validation is strict.** Unknown top-level keys are rejected. See `ALLOWED_PAYLOAD_KEYS` in `timer_store.py`.
