@@ -29,8 +29,8 @@ Base (UDS): `~/.wakelite/run/api.sock`
 - `POST /v1/incidents/{incident_id}/ack` (requires `idempotency_key`)
 
 ### Notification Settings
-- `GET /v1/settings/notifications` — returns `{"notifications_muted": bool}`
-- `POST /v1/settings/notifications` — body: `{"muted": true/false}`
+- `GET /v1/settings/notifications` — returns the current mute state plus the most recent mute-change audit entries
+- `POST /v1/settings/notifications` — body: `{"muted": true/false, "source": "optional caller label"}`; actual state changes record UTC time and source, while idempotent writes do not create duplicate audit entries
 
 ---
 

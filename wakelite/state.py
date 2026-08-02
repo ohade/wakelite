@@ -73,6 +73,16 @@ class StateStore:
                     value TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS notification_mute_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    changed_at TEXT NOT NULL,
+                    muted INTEGER NOT NULL,
+                    source TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_mute_audit_changed
+                ON notification_mute_audit(changed_at DESC, id DESC);
+
                 CREATE TABLE IF NOT EXISTS timer_runtime (
                     timer_id TEXT PRIMARY KEY,
                     is_running INTEGER NOT NULL DEFAULT 0,
@@ -190,6 +200,56 @@ class StateStore:
                 "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def set_notification_mute(
+        self, muted: bool, source: str, *, changed: bool
+    ) -> Optional[Dict[str, Any]]:
+        changed_at = self._now()
+        with self._lock:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('notifications.muted', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("true" if muted else "false",),
+                )
+                if not changed:
+                    conn.commit()
+                    return None
+                cursor = conn.execute(
+                    "INSERT INTO notification_mute_audit(changed_at, muted, source) VALUES(?, ?, ?)",
+                    (changed_at, int(muted), source),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return {
+                "id": int(cursor.lastrowid),
+                "changed_at": changed_at,
+                "muted": muted,
+                "source": source,
+            }
+
+    def list_notification_mute_changes(self, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = min(max(limit, 1), 200)
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT id, changed_at, muted, source "
+                "FROM notification_mute_audit ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "id": int(row["id"]),
+                    "changed_at": str(row["changed_at"]),
+                    "muted": bool(row["muted"]),
+                    "source": str(row["source"]),
+                }
+                for row in rows
+            ]
 
     def get_runtime(self, timer_id: str) -> RuntimeState:
         with self._lock:

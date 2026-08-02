@@ -1315,7 +1315,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           await fetch('/v1/settings/notifications', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ muted: current }),
+                            body: JSON.stringify({ muted: current, source: 'web-ui' }),
                           });
                           await load();
                         });
@@ -1336,15 +1336,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
 
             if method == "GET" and path == "/v1/settings/notifications":
-                self._send_json(200, {"notifications_muted": self.service.get_notifications_muted()})
+                self._send_json(200, self.service.get_notification_settings())
                 return
 
             if method == "POST" and path == "/v1/settings/notifications":
                 body = self._read_json()
                 muted = body.get("muted")
-                if muted is None:
+                if not isinstance(muted, bool):
                     raise ApiError(400, "muted field is required (boolean)")
-                self._send_json(200, self.service.set_notifications_muted(bool(muted)))
+                source = body.get("source", "unspecified")
+                if not isinstance(source, str) or not source.strip():
+                    raise ApiError(400, "source must be a non-empty string when provided")
+                self._send_json(
+                    200,
+                    self.service.set_notifications_muted(
+                        muted, source=f"http-api:{source.strip()}"
+                    ),
+                )
                 return
 
             if method == "GET" and path == "/v1/timers":

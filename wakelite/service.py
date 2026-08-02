@@ -150,6 +150,7 @@ class WakeLiteService:
         daemon_count = sum(1 for t in enabled if t.get("timer_type") == "daemon")
         interval_count = sum(1 for t in enabled if t.get("recurrence", {}).get("frequency") == "interval" and t.get("timer_type") != "daemon")
 
+        mute_changes = self.state.list_notification_mute_changes(limit=1)
         return {
             "version": "2.0.0",
             "status": "ok",
@@ -161,6 +162,7 @@ class WakeLiteService:
             "active_runs": active_runs,
             "max_workers": self.max_workers,
             "notifications_muted": self.notifier.muted,
+            "notifications_mute_last_change": mute_changes[0] if mute_changes else None,
             "unacked_incidents": len(incidents),
             "runner_heartbeat": heartbeat,
             "now": datetime.now(timezone.utc).isoformat(),
@@ -169,10 +171,33 @@ class WakeLiteService:
     def get_notifications_muted(self) -> bool:
         return self.notifier.muted
 
-    def set_notifications_muted(self, muted: bool) -> Dict[str, Any]:
+    def get_notification_settings(self) -> Dict[str, Any]:
+        return {
+            "notifications_muted": self.notifier.muted,
+            "audit": self.state.list_notification_mute_changes(),
+        }
+
+    def set_notifications_muted(
+        self, muted: bool, *, source: str = "service"
+    ) -> Dict[str, Any]:
+        if not isinstance(source, str):
+            raise ValueError("notification mute source must be a string")
+        normalized_source = source.strip()
+        if not normalized_source:
+            raise ValueError("notification mute source must not be empty")
+        if len(normalized_source) > 128:
+            raise ValueError("notification mute source must be at most 128 characters")
+
+        changed = self.notifier.muted != muted
+        audit_entry = self.state.set_notification_mute(
+            muted, normalized_source, changed=changed
+        )
         self.notifier.muted = muted
-        self.state.set_meta("notifications.muted", "true" if muted else "false")
-        return {"notifications_muted": muted}
+        return {
+            "notifications_muted": muted,
+            "changed": changed,
+            "audit_entry": audit_entry,
+        }
 
     @staticmethod
     def _format_daemon_status(ds: "DaemonState", now: datetime) -> str:
