@@ -1486,13 +1486,13 @@ class WakeLiteService:
             lock_path = Path(
                 os.environ.get(
                     "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH",
-                    str(store_path.with_name("claude-hook-sessions.lock")),
+                    f"{store_path}.lock",
                 )
             ).expanduser()
         else:
             cmux_dir = Path.home() / ".cmuxterm"
             store_path = cmux_dir / "claude-hook-sessions.json"
-            lock_path = cmux_dir / "claude-hook-sessions.lock"
+            lock_path = Path(f"{store_path}.lock")
 
         if not store_path.exists() or not lock_path.exists():
             return None
@@ -1521,7 +1521,13 @@ class WakeLiteService:
             return None
 
         if isinstance(parsed, dict):
-            sessions = parsed.get("sessions", [])
+            stored_sessions = parsed.get("sessions", [])
+            if isinstance(stored_sessions, dict):
+                sessions = stored_sessions.values()
+            elif isinstance(stored_sessions, list):
+                sessions = stored_sessions
+            else:
+                sessions = []
         elif isinstance(parsed, list):
             sessions = parsed
         else:
@@ -1537,8 +1543,9 @@ class WakeLiteService:
         if not matches:
             return None
 
-        # CC-95: parse `updatedAt` as datetime instead of lex-sorting strings.
-        # Lex-sort breaks on mixed timezone formats — the same instant
+        # CC-95: normalize numeric-epoch or ISO `updatedAt` values to datetime
+        # instead of lex-sorting strings. Lex-sort breaks on mixed timezone
+        # formats — the same instant
         # serialized as `...+00:00` lex-orders earlier than `...Z` because
         # `+` (0x2B) < `Z` (0x5A). Datetime parsing collapses these to the
         # same instant. Also enforce a 24h freshness cutoff so a long-stale
@@ -1580,9 +1587,15 @@ class WakeLiteService:
     @staticmethod
     def _parse_session_updated_at(value: Any) -> Optional[datetime]:
         """Parse a cmux session-store `updatedAt` field into an aware UTC
-        datetime. cmux writes ISO 8601, typically with a trailing `Z`, but
-        callers may also see `+00:00` or naive timestamps. Returns None on
-        unparseable input — caller treats as "no usable timestamp"."""
+        datetime. Live cmux stores a numeric Unix epoch; ISO 8601 strings,
+        including offsets and naive timestamps, remain accepted for
+        compatibility. Returns None on unparseable input — caller treats it
+        as "no usable timestamp"."""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return datetime.fromtimestamp(value, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
         if not isinstance(value, str) or not value:
             return None
         try:

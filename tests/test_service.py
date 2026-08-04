@@ -1254,16 +1254,16 @@ def _write_amq_callback_identity(
     cmux_dir.mkdir(parents=True, exist_ok=True)
     (cmux_dir / "claude-hook-sessions.json").write_text(
         json.dumps({
-            "sessions": [{
+            "sessions": {session_id: {
                 "sessionId": session_id,
                 "workspaceId": workspace_id,
                 "surfaceId": surface_id,
-                "updatedAt": datetime.now(timezone.utc).isoformat(),
-            }]
+                "updatedAt": datetime.now(timezone.utc).timestamp(),
+            }}
         }),
         encoding="utf-8",
     )
-    (cmux_dir / "claude-hook-sessions.lock").write_text("", encoding="utf-8")
+    (cmux_dir / "claude-hook-sessions.json.lock").write_text("", encoding="utf-8")
 
     root = Path(home) / "amq-root"
     (root / "agents" / recipient).mkdir(parents=True, exist_ok=True)
@@ -2654,12 +2654,14 @@ class CmuxSurfaceNotFoundContractTests(unittest.TestCase):
 
 class CmuxSessionStoreOrderingTests(unittest.TestCase):
     """CC-95: ordering and freshness guarantees for the cmux session-store
-    fallback. Pre-CC-95 the resolver lex-sorted `updatedAt` strings, which
+    fallback. Live cmux stores a session-id-keyed object with numeric epoch
+    `updatedAt` values. List/ISO input remains supported for compatibility.
+    Pre-CC-95 the resolver lex-sorted `updatedAt` strings, which
     (a) misorders mixed timezone formats — `+00:00` < `Z` lexically though
     they're the same instant — and (b) imposed no staleness cutoff, so a
     7-day-old entry could win over a stale-but-recent surface that just
-    churned. Now: parse with `datetime.fromisoformat`, drop entries older
-    than 24h, INFO-log the chosen entry's age."""
+    churned. Now: normalize numeric epochs or ISO strings to aware datetimes,
+    drop entries older than 24h, and INFO-log the chosen entry's age."""
 
     @staticmethod
     def _setup_store(td: str, sessions: list) -> Tuple[Path, Path]:
@@ -2668,6 +2670,42 @@ class CmuxSessionStoreOrderingTests(unittest.TestCase):
         store.write_text(json.dumps({"sessions": sessions}), encoding="utf-8")
         lock.write_text("", encoding="utf-8")
         return store, lock
+
+    def test_live_dict_shape_with_numeric_epoch_resolves(self):
+        """The production store is keyed by sessionId and uses epoch seconds.
+
+        This fails if the resolver regresses to list-only iteration or the
+        timestamp parser regresses to accepting strings only.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime as _dt, timezone as _tz
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+
+            cmux_dir = Path(td) / ".cmuxterm"
+            cmux_dir.mkdir(parents=True, exist_ok=True)
+            store = cmux_dir / "claude-hook-sessions.json"
+            lock = cmux_dir / "claude-hook-sessions.json.lock"
+            store.write_text(json.dumps({
+                "sessions": {
+                    "sess-live-shape": {
+                        "sessionId": "sess-live-shape",
+                        "workspaceId": "ws-live-shape",
+                        "surfaceId": "sf-live-shape",
+                        "updatedAt": _dt.now(_tz.utc).timestamp(),
+                    }
+                }
+            }), encoding="utf-8")
+            lock.write_text("", encoding="utf-8")
+
+            env = {
+                "WAKELITE_CMUX_SESSION_STORE_PATH": "",
+                "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                target = svc._resolve_cmux_target_via_session_store("sess-live-shape")
+
+            self.assertEqual(target, ("ws-live-shape", "sf-live-shape"))
 
     def test_datetime_ordering_picks_latest_instant_across_tz_formats(self):
         """Two entries for the same session — one written `...+00:00`, the
