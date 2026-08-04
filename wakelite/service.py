@@ -1004,6 +1004,10 @@ class WakeLiteService:
         cmux injection path remains the fallback. The signal file stays in
         place unless AMQ confirms that the body was drained. Returns one of
         ``drained``, ``fallback-delivered``, or ``delivery-failed``.
+        ``delivery-failed`` includes both no terminal delivery and a ``partial``
+        injection whose text is present but still awaits manual submission.
+        The caller discards this return value; tests and the structured route
+        log consume it as callback evidence, not as run-completion state.
         """
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
@@ -1107,59 +1111,13 @@ class WakeLiteService:
                 if session_id
                 else message
             )
-            cli_path = self._resolve_cmux_cli_path(callback)
-            workspace_id = callback.get("workspace_id")
-            surface_id = callback.get("surface_id")
-
-            if not cli_path:
-                logger.error(
-                    "cmux callback failed for timer %s: cmux CLI not found or not executable",
-                    timer_id,
-                )
-            elif not workspace_id or not surface_id:
-                logger.error(
-                    "cmux callback failed for timer %s: missing workspace_id or surface_id",
-                    timer_id,
-                )
-            else:
-                env = self._cmux_env(callback)
-                delivery = self._cmux_deliver_trigger(
-                    cli_path, env, workspace_id, surface_id, trigger, timer_id
-                )
-                if delivery == "delivered":
-                    outcome = "fallback-delivered"
-                elif delivery == "stale":
-                    if not session_id:
-                        logger.error(
-                            "cmux callback target is stale for timer %s and no "
-                            "session_id is available for fallback",
-                            timer_id,
-                        )
-                    else:
-                        needs_new_workspace = True
-                        resolved = self._resolve_cmux_target_via_session_store(session_id)
-                        if resolved:
-                            resolved_workspace, resolved_surface = resolved
-                            delivery = self._cmux_deliver_trigger(
-                                cli_path,
-                                env,
-                                resolved_workspace,
-                                resolved_surface,
-                                trigger,
-                                timer_id,
-                            )
-                            if delivery == "delivered":
-                                outcome = "fallback-delivered"
-                                needs_new_workspace = False
-                            elif delivery != "stale":
-                                needs_new_workspace = False
-
-                        if needs_new_workspace:
-                            fallback_delivered = self._cmux_new_workspace_fallback(
-                                cli_path, env, timer, session_id
-                            )
-                            if fallback_delivered:
-                                outcome = "fallback-delivered"
+            outcome = self._deliver_cmux_callback_via_injection(
+                callback,
+                timer,
+                session_id,
+                trigger,
+                timer_id,
+            )
 
         if amq_requested:
             logger.info(
@@ -1172,6 +1130,68 @@ class WakeLiteService:
                 amq_message_id or "none",
             )
         return outcome
+
+    def _deliver_cmux_callback_via_injection(
+        self,
+        callback: Dict[str, Any],
+        timer: Dict[str, Any],
+        session_id: Optional[str],
+        trigger: str,
+        timer_id: str,
+    ) -> str:
+        """Deliver through the existing cmux path and return its terminal outcome."""
+        cli_path = self._resolve_cmux_cli_path(callback)
+        workspace_id = callback.get("workspace_id")
+        surface_id = callback.get("surface_id")
+
+        if not cli_path:
+            logger.error(
+                "cmux callback failed for timer %s: cmux CLI not found or not executable",
+                timer_id,
+            )
+            return "delivery-failed"
+        if not workspace_id or not surface_id:
+            logger.error(
+                "cmux callback failed for timer %s: missing workspace_id or surface_id",
+                timer_id,
+            )
+            return "delivery-failed"
+
+        env = self._cmux_env(callback)
+        delivery = self._cmux_deliver_trigger(
+            cli_path, env, workspace_id, surface_id, trigger, timer_id
+        )
+        if delivery == "delivered":
+            return "fallback-delivered"
+        if delivery != "stale":
+            return "delivery-failed"
+        if not session_id:
+            logger.error(
+                "cmux callback target is stale for timer %s and no "
+                "session_id is available for fallback",
+                timer_id,
+            )
+            return "delivery-failed"
+
+        resolved = self._resolve_cmux_target_via_session_store(session_id)
+        if resolved:
+            resolved_workspace, resolved_surface = resolved
+            delivery = self._cmux_deliver_trigger(
+                cli_path,
+                env,
+                resolved_workspace,
+                resolved_surface,
+                trigger,
+                timer_id,
+            )
+            if delivery == "delivered":
+                return "fallback-delivered"
+            if delivery != "stale":
+                return "delivery-failed"
+
+        if self._cmux_new_workspace_fallback(cli_path, env, timer, session_id):
+            return "fallback-delivered"
+        return "delivery-failed"
 
     @staticmethod
     def _cmux_env(callback: Dict[str, Any]) -> Dict[str, str]:
