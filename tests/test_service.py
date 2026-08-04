@@ -1552,7 +1552,7 @@ class CmuxCallbackTests(unittest.TestCase):
                     "unknown",
                 )
 
-    def test_amq_drained_receipt_delivers_signal_body_and_skips_cmux(self):
+    def test_amq_send_acceptance_delivers_signal_body_and_skips_cmux(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
             svc = WakeLiteService(tick_seconds=1)
@@ -1573,17 +1573,16 @@ class CmuxCallbackTests(unittest.TestCase):
                         args,
                         0,
                         stdout=json.dumps({
-                            "id": "msg-drained-1",
-                            "wait": {"event": "matched", "stage": "drained"},
+                            "id": "msg-sent-1",
                         }),
                         stderr="",
                     )
-                raise AssertionError(f"legacy cmux injection must not run after AMQ drain: {args}")
+                raise AssertionError(f"cmux injection must not run after AMQ accepts the send: {args}")
 
             with patch("wakelite.service.subprocess.run", side_effect=side_effect), \
                  self.assertLogs("wakelite.service", level="INFO") as logs:
                 svc._execute_callback(
-                    timer, "success", 0, "run-amq-drained", _stdout_file(td, "payload-from-run"), 1.0
+                    timer, "success", 0, "run-amq-sent", _stdout_file(td, "payload-from-run"), 1.0
                 )
 
             signal_arg = observed["argv"][observed["argv"].index("--body") + 1]
@@ -1593,22 +1592,17 @@ class CmuxCallbackTests(unittest.TestCase):
                 "--me", "claude", "--to", "claude", "--allow-self",
                 "--body", signal_arg,
                 "--strict", "--json",
-                "--wait-for", "drained", "--wait-timeout", "20s",
             ]
             self.assertEqual(observed["argv"], expected)
-            self.assertEqual(observed["kwargs"]["timeout"], 25)
-            self.assertGreater(
-                observed["kwargs"]["timeout"],
-                int(observed["argv"][-1].removesuffix("s")),
-            )
+            self.assertEqual(observed["kwargs"]["timeout"], 5)
             payload = json.loads(observed["body"])
-            self.assertEqual(payload["run_id"], "run-amq-drained")
+            self.assertEqual(payload["run_id"], "run-amq-sent")
             self.assertEqual(payload["stdout_tail"], "payload-from-run")
             self.assertFalse(_cmux_signal_files(td, "sess-cmux"))
             route_log = "\n".join(logs.output)
             self.assertIn("route=amq", route_log)
-            self.assertIn("outcome=drained", route_log)
-            self.assertIn("amq_message_id=msg-drained-1", route_log)
+            self.assertIn("outcome=amq-sent", route_log)
+            self.assertIn("amq_message_id=msg-sent-1", route_log)
 
     def test_amq_dead_target_uses_existing_new_workspace_fallback(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1645,13 +1639,13 @@ class CmuxCallbackTests(unittest.TestCase):
             )
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
 
-    def test_amq_nonreceipt_falls_back_and_preserves_signal(self):
+    def test_amq_rejected_send_falls_back_and_preserves_signal(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
             svc = WakeLiteService(tick_seconds=1)
             cmux = _make_executable(Path(td) / "cmux")
             _write_amq_callback_identity(td)
-            timer = _cmux_callback_timer("cmux-amq-no-drain", cli_path=cmux, amq=True)
+            timer = _cmux_callback_timer("cmux-amq-rejected", cli_path=cmux, amq=True)
 
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
@@ -1661,8 +1655,7 @@ class CmuxCallbackTests(unittest.TestCase):
                         args,
                         1,
                         stdout=json.dumps({
-                            "id": "msg-no-drain",
-                            "wait": {"event": "timeout", "stage": "sent"},
+                            "id": "msg-rejected",
                         }),
                         stderr="",
                     )
@@ -1671,20 +1664,20 @@ class CmuxCallbackTests(unittest.TestCase):
             with patch("wakelite.service.subprocess.run", side_effect=side_effect) as mock_run, \
                  self.assertLogs("wakelite.service", level="INFO") as logs:
                 svc._execute_callback(
-                    timer, "success", 0, "run-amq-no-drain", _stdout_file(td), 1.0
+                    timer, "success", 0, "run-amq-rejected", _stdout_file(td), 1.0
                 )
 
             calls = [call.args[0] for call in mock_run.call_args_list]
             self.assertIn(
                 [cmux, "send", "--workspace", "ws-123", "--surface", "sf-456", "--",
-                 "[WakeLite: cmux-amq-no-drain completed (success)]"],
+                 "[WakeLite: cmux-amq-rejected completed (success)]"],
                 calls,
             )
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
             route_log = "\n".join(logs.output)
             self.assertIn("route=cmux_fallback", route_log)
             self.assertIn("outcome=fallback-delivered", route_log)
-            self.assertIn("amq_message_id=msg-no-drain", route_log)
+            self.assertIn("amq_message_id=msg-rejected", route_log)
 
     def test_amq_and_cmux_failure_returns_delivery_failed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1703,7 +1696,6 @@ class CmuxCallbackTests(unittest.TestCase):
                         1,
                         stdout=json.dumps({
                             "id": "msg-double-failure",
-                            "wait": {"event": "timeout", "stage": "sent"},
                         }),
                         stderr="",
                     )
@@ -1732,16 +1724,10 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertIn("outcome=delivery-failed", route_log)
             self.assertIn("amq_message_id=msg-double-failure", route_log)
 
-    def test_amq_rc_zero_without_exact_drained_receipt_falls_back(self):
+    def test_amq_rc_zero_without_nonempty_message_id_falls_back(self):
         cases = (
-            ("wrong-event", json.dumps({
-                "id": "msg-wrong-event",
-                "wait": {"event": "timeout", "stage": "drained"},
-            })),
-            ("wrong-stage", json.dumps({
-                "id": "msg-wrong-stage",
-                "wait": {"event": "matched", "stage": "sent"},
-            })),
+            ("missing-id", json.dumps({})),
+            ("empty-id", json.dumps({"id": "  "})),
             ("malformed-json", "not-json"),
         )
         for case, stdout in cases:
@@ -1771,7 +1757,7 @@ class CmuxCallbackTests(unittest.TestCase):
                 self.assertTrue(any(args[0] == cmux and args[1] == "send" for args in calls))
                 self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
                 log_text = "\n".join(logs.output)
-                self.assertIn("did not receive a drained receipt", log_text)
+                self.assertIn("AMQ callback send was not accepted", log_text)
                 if case == "malformed-json":
                     self.assertIn("Unable to parse AMQ callback JSON response", log_text)
 
@@ -1832,7 +1818,7 @@ class CmuxCallbackTests(unittest.TestCase):
                 self.assertEqual(calls[0][1], "send")
                 self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
 
-    def test_amq_timeout_exception_uses_outer_backstop_after_inner_wait(self):
+    def test_amq_send_timeout_uses_send_scoped_backstop(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
             svc = WakeLiteService(tick_seconds=1)
@@ -1855,13 +1841,13 @@ class CmuxCallbackTests(unittest.TestCase):
                     timer, "success", 0, "run-amq-timeout", _stdout_file(td), 1.0
                 )
 
-            self.assertEqual(amq_timeouts, [25])
+            self.assertEqual(amq_timeouts, [5])
             amq_call = next(
                 args for args in (call.args[0] for call in mock_run.call_args_list)
                 if args[0] == "/opt/homebrew/bin/amq"
             )
-            inner_wait = int(amq_call[amq_call.index("--wait-timeout") + 1].removesuffix("s"))
-            self.assertGreater(amq_timeouts[0], inner_wait)
+            self.assertNotIn("--wait-for", amq_call)
+            self.assertNotIn("--wait-timeout", amq_call)
             calls = [call.args[0] for call in mock_run.call_args_list]
             self.assertTrue(any(args[1] == "send" for args in calls if args[0] == cmux))
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
@@ -1882,10 +1868,7 @@ class CmuxCallbackTests(unittest.TestCase):
                     return subprocess.CompletedProcess(
                         args,
                         0,
-                        stdout=json.dumps({
-                            "id": "msg-unknown",
-                            "wait": {"event": "matched", "stage": "drained"},
-                        }),
+                        stdout=json.dumps({"id": "msg-unknown"}),
                         stderr="",
                     )
                 raise AssertionError(f"legacy cmux injection must not run: {args}")

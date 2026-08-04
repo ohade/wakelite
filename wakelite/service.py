@@ -20,8 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .config import (
     AMQ_BINARY_PATH,
-    AMQ_CALLBACK_PROCESS_TIMEOUT_SECONDS,
-    AMQ_CALLBACK_RECEIPT_TIMEOUT_SECONDS,
+    AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
     AMQ_KEEPALIVE_REGISTRY_FILE,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_RETENTION_DAYS,
@@ -999,11 +998,12 @@ class WakeLiteService:
         """Route a cmux callback through AMQ when opted in, else inject it.
 
         The full callback payload lives in the terminal-neutral signal file.
-        AMQ delivery is accepted only after a drained receipt. If AMQ is
-        unavailable, does not drain, or the target is known dead, the existing
-        cmux injection path remains the fallback. The signal file stays in
-        place unless AMQ confirms that the body was drained. Returns one of
-        ``drained``, ``fallback-delivered``, or ``delivery-failed``.
+        AMQ delivery is accepted when the send exits successfully with a
+        non-empty message ID, proving that the full payload was stored in the
+        mailbox. If AMQ is unavailable, rejects the send, or the target is
+        known dead, the existing cmux injection path remains the fallback. The
+        signal file stays in place unless AMQ accepts the message. Returns one
+        of ``amq-sent``, ``fallback-delivered``, or ``delivery-failed``.
         ``delivery-failed`` includes both no terminal delivery and a ``partial``
         injection whose text is present but still awaits manual submission.
         The caller discards this return value; tests and the structured route
@@ -1096,16 +1096,16 @@ class WakeLiteService:
                         signal_file.unlink(missing_ok=True)
                     except OSError:
                         logger.warning(
-                            "AMQ drained callback but signal cleanup failed for timer %s run %s: %s",
+                            "AMQ accepted callback but signal cleanup failed for timer %s run %s: %s",
                             timer_id,
                             run_id,
                             signal_file,
                             exc_info=True,
                         )
-                outcome = "drained"
+                outcome = "amq-sent"
                 route = "amq"
 
-        if outcome != "drained":
+        if outcome != "amq-sent":
             trigger = (
                 f"[WakeLite: {timer_name} completed ({status})]"
                 if session_id
@@ -1353,7 +1353,7 @@ class WakeLiteService:
         session_id: Optional[str],
         signal_file: Optional[Path],
     ) -> Tuple[bool, Optional[str]]:
-        """Attempt AMQ delivery and require an explicit drained receipt."""
+        """Attempt AMQ delivery and require an accepted message ID."""
         if not session_id or signal_file is None:
             return False, None
 
@@ -1390,12 +1390,8 @@ class WakeLiteService:
                 f"@{signal_file}",
                 "--strict",
                 "--json",
-                "--wait-for",
-                "drained",
-                "--wait-timeout",
-                f"{AMQ_CALLBACK_RECEIPT_TIMEOUT_SECONDS}s",
             ],
-            timeout=AMQ_CALLBACK_PROCESS_TIMEOUT_SECONDS,
+            timeout=AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
             check=False,
             capture_output=True,
             text=True,
@@ -1408,20 +1404,20 @@ class WakeLiteService:
                 parsed = candidate
         except json.JSONDecodeError as exc:
             logger.warning("Unable to parse AMQ callback JSON response: %s", exc)
-        message_id = parsed.get("id") if isinstance(parsed.get("id"), str) else None
-        wait = parsed.get("wait") if isinstance(parsed.get("wait"), dict) else {}
-        drained = (
-            result.returncode == 0
-            and wait.get("event") == "matched"
-            and wait.get("stage") == "drained"
+        raw_message_id = parsed.get("id")
+        message_id = (
+            raw_message_id.strip()
+            if isinstance(raw_message_id, str) and raw_message_id.strip()
+            else None
         )
-        if not drained:
+        accepted = result.returncode == 0 and message_id is not None
+        if not accepted:
             logger.warning(
-                "AMQ callback did not receive a drained receipt (id=%s returncode=%s); falling back to cmux",
+                "AMQ callback send was not accepted (id=%s returncode=%s); falling back to cmux",
                 message_id or "none",
                 result.returncode,
             )
-        return drained, message_id
+        return accepted, message_id
 
     def _cmux_deliver_trigger(
         self,
