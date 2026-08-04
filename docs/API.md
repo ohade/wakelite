@@ -192,10 +192,15 @@ Optional. Reconnects timer results to the originating terminal session.
 | `socket_path` | string | no | from `$CMUX_SOCKET_PATH` | Optional cmux socket path passed to callback subprocesses |
 | `cli_path` | string | no | detected cmux CLI | Optional cmux CLI path. Auto-capture checks `$CMUX_BUNDLED_CLI_PATH`, `/opt/homebrew/bin/cmux`, `/usr/local/bin/cmux`, then `/Applications/cmux.app/Contents/Resources/bin/cmux` |
 | `session_id` | string | no | `null` | Claude Code session ID for `--resume` fallback when pane is gone |
+| `amq` | bool | no | `false` | cmux only. Opt in to AMQ delivery unless the target is known dead; alive and unknown targets may route through AMQ, with mailbox identity derived at fire time from `session_id` |
 
 **Behavior:**
 - Callback fires on `success` and `failed` status only. Never on `waiting` (exit 75) or `aborted`.
 - Terminal identity is auto-captured when creating via CLI, MCP, or REST API if the server process has the relevant environment variables. Detection order is cmux, Ghostty, then WezTerm.
+- Callback objects reject unknown subkeys. A misspelling such as `"ammq": true` fails validation instead of silently disabling the route.
+- For a cmux callback with `"amq": true`, WakeLite writes the recovery signal first, resolves the current surface and its AMQ wake registration from `session_id`, and self-delivers the full callback payload as the AMQ message body. Alive and unknown targets route through AMQ; only a canonical stale-target result proves the target dead. An AMQ send that exits successfully with a non-empty message ID proves that AMQ stored the body: WakeLite then deletes the local signal file and deliberately surrenders the cmux fallback. A dead target, missing identity, rejected/malformed send, or send timeout uses the existing cmux fallback. `WAKELITE_AMQ_CALLBACK_ENABLED=false` disables this route globally.
+- The cmux callback path records a terminal outcome: `amq-sent`, `fallback-delivered`, or `delivery-failed`. Failed delivery keeps the signal file for recovery.
+- AMQ-to-fallback delivery is at-least-once: if `amq send` exceeds the 5-second process timeout after storing the body, WakeLite falls back and the stored message may still be drained later, exposing the same `run_id` twice.
 - **Happy path:** If the pane exists, results are injected via `wezterm cli send-text` and auto-submitted (Enter pressed). Claude Code receives it as a new prompt.
 - **Fallback:** If the pane is gone, a Slack DM is sent. If `session_id` is set, a new WezTerm tab opens with `claude --resume <session_id>` and results are injected there.
 
@@ -219,7 +224,8 @@ cmux example:
     "surface_id": "surface-uuid",
     "socket_path": "/path/to/cmux.sock",
     "cli_path": "/opt/homebrew/bin/cmux",
-    "session_id": "abc-def-123"
+    "session_id": "abc-def-123",
+    "amq": true
   }
 }
 ```

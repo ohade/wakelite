@@ -22,6 +22,14 @@ ALLOWED_EXECUTION_KEYS = {"overlap", "max_concurrent", "restart_on_failure", "re
 ALLOWED_OVERLAP_VALUES = {"skip", "queue", "allow"}
 ALLOWED_RESOURCE_KEYS = {"name", "description", "capacity", "estimated_usage"}
 ALLOWED_CALLBACK_TYPES = ("wezterm", "ghostty", "cmux")
+ALLOWED_CALLBACK_KEYS = {
+    "wezterm": {"type", "pane_id", "session_id"},
+    "ghostty": {"type", "terminal_id", "session_id"},
+    "cmux": {
+        "type", "workspace_id", "surface_id", "panel_id", "socket_path",
+        "cli_path", "session_id", "amq",
+    },
+}
 
 
 class TimerStore:
@@ -162,7 +170,17 @@ class TimerStore:
                     ", ".join(ALLOWED_CALLBACK_TYPES),
                 )
                 timer["callback"] = None
+            elif "amq" in callback and cb_type != "cmux":
+                raise ValueError("callback.amq is only valid for cmux callbacks")
+            elif unknown_callback := set(callback) - ALLOWED_CALLBACK_KEYS[cb_type]:
+                raise ValueError(
+                    f"Unknown keys in callback: {unknown_callback}. "
+                    f"Allowed for {cb_type}: "
+                    f"{', '.join(sorted(ALLOWED_CALLBACK_KEYS[cb_type]))}"
+                )
             elif cb_type == "cmux":
+                if "amq" in callback and not isinstance(callback["amq"], bool):
+                    raise ValueError("callback.amq must be a boolean")
                 workspace_id = callback.get("workspace_id")
                 surface_id = callback.get("surface_id")
                 panel_id = callback.get("panel_id")

@@ -19,6 +19,9 @@ from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from .config import (
+    AMQ_BINARY_PATH,
+    AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
+    AMQ_KEEPALIVE_REGISTRY_FILE,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_RETENTION_DAYS,
     LOG_DIR,
@@ -27,6 +30,7 @@ from .config import (
     RUN_LOG_RETENTION_DAYS,
     RUNNER_LOG,
     WAKE_INTENTS_FILE,
+    amq_callback_enabled,
     ensure_dirs,
 )
 from . import capacity
@@ -990,12 +994,20 @@ class WakeLiteService:
         duration: str,
         stdout_tail: str,
         callback: Dict[str, Any],
-    ) -> None:
-        """Send a short trigger to a cmux surface.
+    ) -> str:
+        """Route a cmux callback through AMQ when opted in, else inject it.
 
         The full callback payload lives in the terminal-neutral signal file.
-        If terminal injection is missing or partial, the signal file is left in
-        place so the next prompt or a manual retrigger can still consume it.
+        AMQ delivery is accepted when the send exits successfully with a
+        non-empty message ID, proving that the full payload was stored in the
+        mailbox. If AMQ is unavailable, rejects the send, or the target is
+        known dead, the existing cmux injection path remains the fallback. The
+        signal file stays in place unless AMQ accepts the message. Returns one
+        of ``amq-sent``, ``fallback-delivered``, or ``delivery-failed``.
+        ``delivery-failed`` includes both no terminal delivery and a ``partial``
+        injection whose text is present but still awaits manual submission.
+        The caller discards this return value; tests and the structured route
+        log consume it as callback evidence, not as run-completion state.
         """
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
@@ -1018,8 +1030,9 @@ class WakeLiteService:
         # workspace_id/surface_id, or stale target with no session-store
         # fallback). Writing first guarantees the data is recoverable on disk
         # regardless of which downstream branch we take.
+        signal_file: Optional[Path] = None
         try:
-            self._write_callback_signal(
+            signal_file = self._write_callback_signal(
                 session_id,
                 run_id,
                 timer_name,
@@ -1056,38 +1069,109 @@ class WakeLiteService:
                     run_id,
                 )
 
-        if session_id:
-            trigger = f"[WakeLite: {timer_name} completed ({status})]"
-        else:
-            trigger = message
+        amq_requested = bool(callback.get("amq"))
+        amq_message_id: Optional[str] = None
+        outcome = "delivery-failed"
+        route = "cmux_fallback"
+        if amq_requested:
+            delivered_via_amq = False
+            if amq_callback_enabled():
+                try:
+                    delivered_via_amq, amq_message_id = self._deliver_cmux_callback_via_amq(
+                        callback,
+                        session_id,
+                        signal_file,
+                    )
+                except Exception:
+                    logger.warning(
+                        "AMQ callback route failed for timer %s run %s; falling back to cmux",
+                        timer_id,
+                        run_id,
+                        exc_info=True,
+                    )
 
+            if delivered_via_amq:
+                if signal_file is not None:
+                    try:
+                        signal_file.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "AMQ accepted callback but signal cleanup failed for timer %s run %s: %s",
+                            timer_id,
+                            run_id,
+                            signal_file,
+                            exc_info=True,
+                        )
+                outcome = "amq-sent"
+                route = "amq"
+
+        if outcome != "amq-sent":
+            trigger = (
+                f"[WakeLite: {timer_name} completed ({status})]"
+                if session_id
+                else message
+            )
+            outcome = self._deliver_cmux_callback_via_injection(
+                callback,
+                timer,
+                session_id,
+                trigger,
+                timer_id,
+            )
+
+        if amq_requested:
+            logger.info(
+                "callback_route timer_id=%s run_id=%s route=%s "
+                "outcome=%s amq_message_id=%s",
+                timer_id,
+                run_id,
+                route,
+                outcome,
+                amq_message_id or "none",
+            )
+        return outcome
+
+    def _deliver_cmux_callback_via_injection(
+        self,
+        callback: Dict[str, Any],
+        timer: Dict[str, Any],
+        session_id: Optional[str],
+        trigger: str,
+        timer_id: str,
+    ) -> str:
+        """Deliver through the existing cmux path and return its terminal outcome."""
         cli_path = self._resolve_cmux_cli_path(callback)
-        if not cli_path:
-            logger.error("cmux callback failed for timer %s: cmux CLI not found or not executable", timer_id)
-            return
-
         workspace_id = callback.get("workspace_id")
         surface_id = callback.get("surface_id")
+
+        if not cli_path:
+            logger.error(
+                "cmux callback failed for timer %s: cmux CLI not found or not executable",
+                timer_id,
+            )
+            return "delivery-failed"
         if not workspace_id or not surface_id:
             logger.error(
                 "cmux callback failed for timer %s: missing workspace_id or surface_id",
                 timer_id,
             )
-            return
+            return "delivery-failed"
 
         env = self._cmux_env(callback)
-        delivery = self._cmux_deliver_trigger(cli_path, env, workspace_id, surface_id, trigger, timer_id)
-        if delivery in ("delivered", "partial"):
-            return
+        delivery = self._cmux_deliver_trigger(
+            cli_path, env, workspace_id, surface_id, trigger, timer_id
+        )
+        if delivery == "delivered":
+            return "fallback-delivered"
         if delivery != "stale":
-            return
-
+            return "delivery-failed"
         if not session_id:
             logger.error(
-                "cmux callback target is stale for timer %s and no session_id is available for fallback",
+                "cmux callback target is stale for timer %s and no "
+                "session_id is available for fallback",
                 timer_id,
             )
-            return
+            return "delivery-failed"
 
         resolved = self._resolve_cmux_target_via_session_store(session_id)
         if resolved:
@@ -1100,12 +1184,14 @@ class WakeLiteService:
                 trigger,
                 timer_id,
             )
-            if delivery in ("delivered", "partial"):
-                return
+            if delivery == "delivered":
+                return "fallback-delivered"
             if delivery != "stale":
-                return
+                return "delivery-failed"
 
-        self._cmux_new_workspace_fallback(cli_path, env, timer, session_id)
+        if self._cmux_new_workspace_fallback(cli_path, env, timer, session_id):
+            return "fallback-delivered"
+        return "delivery-failed"
 
     @staticmethod
     def _cmux_env(callback: Dict[str, Any]) -> Dict[str, str]:
@@ -1207,6 +1293,132 @@ class WakeLiteService:
             logger.error("cmux command failed (%s %s): %s", cli_path, " ".join(args[:2]), exc)
             return None
 
+    def _cmux_probe_liveness(
+        self,
+        cli_path: str,
+        env: Dict[str, str],
+        surface_id: str,
+    ) -> str:
+        """Return alive, dead, or unknown for the current cmux surface."""
+        params = json.dumps({"lines": 1, "surface_id": surface_id}, separators=(",", ":"))
+        result = self._cmux_run(cli_path, ["rpc", "surface.read_text", params], env)
+        if result is None:
+            return "unknown"
+        if result.returncode == 0:
+            return "alive"
+        if self._cmux_surface_not_found(result):
+            return "dead"
+        return "unknown"
+
+    @staticmethod
+    def _resolve_amq_mailbox_for_surface(surface_id: str) -> Optional[Tuple[str, str]]:
+        """Resolve one attached AMQ root/recipient for a cmux surface."""
+        try:
+            payload = json.loads(AMQ_KEEPALIVE_REGISTRY_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.info("AMQ keepalive registry unavailable; falling back to cmux", exc_info=True)
+            return None
+
+        entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        target = f"cmux:surface:{surface_id}"
+        identities: set[Tuple[str, str]] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("adapter") != "cmux" or entry.get("target") != target:
+                continue
+            if entry.get("state") != "attached":
+                continue
+            root = entry.get("root")
+            recipient = entry.get("agent")
+            if not isinstance(root, str) or not isinstance(recipient, str):
+                continue
+            root_path = Path(root)
+            if not root_path.is_absolute() or not (root_path / "agents" / recipient).is_dir():
+                continue
+            identities.add((str(root_path), recipient))
+
+        if len(identities) != 1:
+            logger.warning(
+                "AMQ identity resolution for surface %s found %d attached mailboxes; falling back to cmux",
+                surface_id,
+                len(identities),
+            )
+            return None
+        return next(iter(identities))
+
+    def _deliver_cmux_callback_via_amq(
+        self,
+        callback: Dict[str, Any],
+        session_id: Optional[str],
+        signal_file: Optional[Path],
+    ) -> Tuple[bool, Optional[str]]:
+        """Attempt AMQ delivery and require an accepted message ID."""
+        if not session_id or signal_file is None:
+            return False, None
+
+        resolved = self._resolve_cmux_target_via_session_store(session_id)
+        if not resolved:
+            return False, None
+        _, surface_id = resolved
+
+        mailbox = self._resolve_amq_mailbox_for_surface(surface_id)
+        if not mailbox:
+            return False, None
+        root, recipient = mailbox
+
+        cli_path = self._resolve_cmux_cli_path(callback)
+        if cli_path:
+            liveness = self._cmux_probe_liveness(cli_path, self._cmux_env(callback), surface_id)
+            if liveness == "dead":
+                logger.info("AMQ callback target surface %s is dead; falling back to cmux", surface_id)
+                return False, None
+
+        result = subprocess.run(
+            [
+                AMQ_BINARY_PATH,
+                "send",
+                "--root",
+                root,
+                "--ignore-session-pin",
+                "--me",
+                recipient,
+                "--to",
+                recipient,
+                "--allow-self",
+                "--body",
+                f"@{signal_file}",
+                "--strict",
+                "--json",
+            ],
+            timeout=AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        parsed: Dict[str, Any] = {}
+        try:
+            candidate = json.loads(result.stdout)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except json.JSONDecodeError as exc:
+            logger.warning("Unable to parse AMQ callback JSON response: %s", exc)
+        raw_message_id = parsed.get("id")
+        message_id = (
+            raw_message_id.strip()
+            if isinstance(raw_message_id, str) and raw_message_id.strip()
+            else None
+        )
+        accepted = result.returncode == 0 and message_id is not None
+        if not accepted:
+            logger.warning(
+                "AMQ callback send was not accepted (id=%s returncode=%s); falling back to cmux",
+                message_id or "none",
+                result.returncode,
+            )
+        return accepted, message_id
+
     def _cmux_deliver_trigger(
         self,
         cli_path: str,
@@ -1270,13 +1482,13 @@ class WakeLiteService:
             lock_path = Path(
                 os.environ.get(
                     "WAKELITE_CMUX_SESSION_STORE_LOCK_PATH",
-                    str(store_path.with_name("claude-hook-sessions.lock")),
+                    f"{store_path}.lock",
                 )
             ).expanduser()
         else:
             cmux_dir = Path.home() / ".cmuxterm"
             store_path = cmux_dir / "claude-hook-sessions.json"
-            lock_path = cmux_dir / "claude-hook-sessions.lock"
+            lock_path = Path(f"{store_path}.lock")
 
         if not store_path.exists() or not lock_path.exists():
             return None
@@ -1305,7 +1517,13 @@ class WakeLiteService:
             return None
 
         if isinstance(parsed, dict):
-            sessions = parsed.get("sessions", [])
+            stored_sessions = parsed.get("sessions", [])
+            if isinstance(stored_sessions, dict):
+                sessions = stored_sessions.values()
+            elif isinstance(stored_sessions, list):
+                sessions = stored_sessions
+            else:
+                sessions = []
         elif isinstance(parsed, list):
             sessions = parsed
         else:
@@ -1321,8 +1539,9 @@ class WakeLiteService:
         if not matches:
             return None
 
-        # CC-95: parse `updatedAt` as datetime instead of lex-sorting strings.
-        # Lex-sort breaks on mixed timezone formats — the same instant
+        # CC-95: normalize numeric-epoch or ISO `updatedAt` values to datetime
+        # instead of lex-sorting strings. Lex-sort breaks on mixed timezone
+        # formats — the same instant
         # serialized as `...+00:00` lex-orders earlier than `...Z` because
         # `+` (0x2B) < `Z` (0x5A). Datetime parsing collapses these to the
         # same instant. Also enforce a 24h freshness cutoff so a long-stale
@@ -1364,9 +1583,15 @@ class WakeLiteService:
     @staticmethod
     def _parse_session_updated_at(value: Any) -> Optional[datetime]:
         """Parse a cmux session-store `updatedAt` field into an aware UTC
-        datetime. cmux writes ISO 8601, typically with a trailing `Z`, but
-        callers may also see `+00:00` or naive timestamps. Returns None on
-        unparseable input — caller treats as "no usable timestamp"."""
+        datetime. Live cmux stores a numeric Unix epoch; ISO 8601 strings,
+        including offsets and naive timestamps, remain accepted for
+        compatibility. Returns None on unparseable input — caller treats it
+        as "no usable timestamp"."""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return datetime.fromtimestamp(value, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
         if not isinstance(value, str) or not value:
             return None
         try:
@@ -1406,7 +1631,7 @@ class WakeLiteService:
         env: Dict[str, str],
         timer: Dict[str, Any],
         session_id: str,
-    ) -> None:
+    ) -> bool:
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
         cwd = timer.get("command", {}).get("workingDirectory") or str(Path.home())
@@ -1417,15 +1642,15 @@ class WakeLiteService:
             timeout=10,
         )
         if result is None:
-            return
+            return False
         if result.returncode != 0:
             logger.error("cmux new-workspace fallback failed for timer %s: %s", timer_id, self._cmux_result_text(result))
-            return
+            return False
 
         workspace_id = self._cmux_workspace_id_from_new_workspace(result)
         if not workspace_id:
             logger.error("cmux new-workspace fallback returned no workspace id for timer %s", timer_id)
-            return
+            return False
 
         ready = False
         for attempt in range(10):
@@ -1444,7 +1669,7 @@ class WakeLiteService:
                 "cmux new-workspace fallback did not reach a prompt for timer %s; signal file preserved",
                 timer_id,
             )
-            return
+            return False
 
         # CC-95: type the resume command via argv (no shell, so shlex.quote is unnecessary
         # and would inject literal quote chars). Submit it with an explicit `send-key Enter`
@@ -1460,7 +1685,7 @@ class WakeLiteService:
         if send_resume is None or send_resume.returncode != 0:
             detail = self._cmux_result_text(send_resume) if send_resume is not None else "send did not run"
             logger.error("cmux resume send failed for timer %s: %s", timer_id, detail)
-            return
+            return False
 
         enter_result: Optional[subprocess.CompletedProcess[Any]] = None
         for attempt in range(3):
@@ -1475,7 +1700,7 @@ class WakeLiteService:
                     workspace_id,
                     timer_id,
                 )
-                return
+                return True
             time.sleep(1.0 * (attempt + 1))
 
         detail = self._cmux_result_text(enter_result) if enter_result is not None else "send-key did not run"
@@ -1484,6 +1709,7 @@ class WakeLiteService:
             timer_id,
             detail,
         )
+        return False
 
     def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
                           timer_name: str = "", status: str = "",
