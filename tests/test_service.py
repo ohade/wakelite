@@ -1517,6 +1517,11 @@ class CmuxCallbackTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "callback.amq must be a boolean"):
                 svc.timer_store.create_timer(explicit_null)
 
+            typo = _cmux_callback_timer("cmux-ammq-typo", cli_path=cmux)
+            typo["callback"]["ammq"] = True
+            with self.assertRaisesRegex(ValueError, "Unknown keys in callback"):
+                svc.timer_store.create_timer(typo)
+
             for non_cmux in (
                 _callback_timer("wezterm-amq-invalid"),
                 _ghostty_callback_timer("ghostty-amq-invalid"),
@@ -1602,6 +1607,7 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertFalse(_cmux_signal_files(td, "sess-cmux"))
             route_log = "\n".join(logs.output)
             self.assertIn("route=amq", route_log)
+            self.assertIn("outcome=drained", route_log)
             self.assertIn("amq_message_id=msg-drained-1", route_log)
 
     def test_amq_dead_target_uses_existing_new_workspace_fallback(self):
@@ -1677,7 +1683,54 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
             route_log = "\n".join(logs.output)
             self.assertIn("route=cmux_fallback", route_log)
+            self.assertIn("outcome=fallback-delivered", route_log)
             self.assertIn("amq_message_id=msg-no-drain", route_log)
+
+    def test_amq_and_cmux_failure_returns_delivery_failed(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            _write_amq_callback_identity(td)
+            timer = _cmux_callback_timer("cmux-amq-double-failure", cli_path=cmux, amq=True)
+
+            def side_effect(args, **kwargs):
+                if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if args[0] == "/opt/homebrew/bin/amq":
+                    return subprocess.CompletedProcess(
+                        args,
+                        1,
+                        stdout=json.dumps({
+                            "id": "msg-double-failure",
+                            "wait": {"event": "timeout", "stage": "sent"},
+                        }),
+                        stderr="",
+                    )
+                if args[0] == cmux and args[1] == "send":
+                    return subprocess.CompletedProcess(
+                        args, 1, stdout="", stderr="socket unavailable"
+                    )
+                raise AssertionError(f"unexpected subprocess call: {args}")
+
+            with patch("wakelite.service.subprocess.run", side_effect=side_effect), \
+                 self.assertLogs("wakelite.service", level="INFO") as logs:
+                outcome = svc._cmux_callback(
+                    timer,
+                    "run-amq-double-failure",
+                    "success",
+                    0,
+                    "1s",
+                    "payload-from-run",
+                    timer["callback"],
+                )
+
+            self.assertEqual(outcome, "delivery-failed")
+            self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+            route_log = "\n".join(logs.output)
+            self.assertIn("route=cmux_fallback", route_log)
+            self.assertIn("outcome=delivery-failed", route_log)
+            self.assertIn("amq_message_id=msg-double-failure", route_log)
 
     def test_amq_rc_zero_without_exact_drained_receipt_falls_back(self):
         cases = (

@@ -995,14 +995,15 @@ class WakeLiteService:
         duration: str,
         stdout_tail: str,
         callback: Dict[str, Any],
-    ) -> None:
+    ) -> str:
         """Route a cmux callback through AMQ when opted in, else inject it.
 
         The full callback payload lives in the terminal-neutral signal file.
         AMQ delivery is accepted only after a drained receipt. If AMQ is
         unavailable, does not drain, or the target is known dead, the existing
         cmux injection path remains the fallback. The signal file stays in
-        place unless AMQ confirms that the body was drained.
+        place unless AMQ confirms that the body was drained. Returns one of
+        ``drained``, ``fallback-delivered``, or ``delivery-failed``.
         """
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
@@ -1064,9 +1065,12 @@ class WakeLiteService:
                     run_id,
                 )
 
-        if callback.get("amq"):
+        amq_requested = bool(callback.get("amq"))
+        amq_message_id: Optional[str] = None
+        outcome = "delivery-failed"
+        route = "cmux_fallback"
+        if amq_requested:
             delivered_via_amq = False
-            amq_message_id: Optional[str] = None
             if amq_callback_enabled():
                 try:
                     delivered_via_amq, amq_message_id = self._deliver_cmux_callback_via_amq(
@@ -1082,14 +1086,6 @@ class WakeLiteService:
                         exc_info=True,
                     )
 
-            route = "amq" if delivered_via_amq else "cmux_fallback"
-            logger.info(
-                "callback_route timer_id=%s run_id=%s route=%s amq_message_id=%s",
-                timer_id,
-                run_id,
-                route,
-                amq_message_id or "none",
-            )
             if delivered_via_amq:
                 if signal_file is not None:
                     try:
@@ -1102,58 +1098,80 @@ class WakeLiteService:
                             signal_file,
                             exc_info=True,
                         )
-                return
+                outcome = "drained"
+                route = "amq"
 
-        if session_id:
-            trigger = f"[WakeLite: {timer_name} completed ({status})]"
-        else:
-            trigger = message
-
-        cli_path = self._resolve_cmux_cli_path(callback)
-        if not cli_path:
-            logger.error("cmux callback failed for timer %s: cmux CLI not found or not executable", timer_id)
-            return
-
-        workspace_id = callback.get("workspace_id")
-        surface_id = callback.get("surface_id")
-        if not workspace_id or not surface_id:
-            logger.error(
-                "cmux callback failed for timer %s: missing workspace_id or surface_id",
-                timer_id,
+        if outcome != "drained":
+            trigger = (
+                f"[WakeLite: {timer_name} completed ({status})]"
+                if session_id
+                else message
             )
-            return
+            cli_path = self._resolve_cmux_cli_path(callback)
+            workspace_id = callback.get("workspace_id")
+            surface_id = callback.get("surface_id")
 
-        env = self._cmux_env(callback)
-        delivery = self._cmux_deliver_trigger(cli_path, env, workspace_id, surface_id, trigger, timer_id)
-        if delivery in ("delivered", "partial"):
-            return
-        if delivery != "stale":
-            return
+            if not cli_path:
+                logger.error(
+                    "cmux callback failed for timer %s: cmux CLI not found or not executable",
+                    timer_id,
+                )
+            elif not workspace_id or not surface_id:
+                logger.error(
+                    "cmux callback failed for timer %s: missing workspace_id or surface_id",
+                    timer_id,
+                )
+            else:
+                env = self._cmux_env(callback)
+                delivery = self._cmux_deliver_trigger(
+                    cli_path, env, workspace_id, surface_id, trigger, timer_id
+                )
+                if delivery == "delivered":
+                    outcome = "fallback-delivered"
+                elif delivery == "stale":
+                    if not session_id:
+                        logger.error(
+                            "cmux callback target is stale for timer %s and no "
+                            "session_id is available for fallback",
+                            timer_id,
+                        )
+                    else:
+                        needs_new_workspace = True
+                        resolved = self._resolve_cmux_target_via_session_store(session_id)
+                        if resolved:
+                            resolved_workspace, resolved_surface = resolved
+                            delivery = self._cmux_deliver_trigger(
+                                cli_path,
+                                env,
+                                resolved_workspace,
+                                resolved_surface,
+                                trigger,
+                                timer_id,
+                            )
+                            if delivery == "delivered":
+                                outcome = "fallback-delivered"
+                                needs_new_workspace = False
+                            elif delivery != "stale":
+                                needs_new_workspace = False
 
-        if not session_id:
-            logger.error(
-                "cmux callback target is stale for timer %s and no session_id is available for fallback",
+                        if needs_new_workspace:
+                            fallback_delivered = self._cmux_new_workspace_fallback(
+                                cli_path, env, timer, session_id
+                            )
+                            if fallback_delivered:
+                                outcome = "fallback-delivered"
+
+        if amq_requested:
+            logger.info(
+                "callback_route timer_id=%s run_id=%s route=%s "
+                "outcome=%s amq_message_id=%s",
                 timer_id,
+                run_id,
+                route,
+                outcome,
+                amq_message_id or "none",
             )
-            return
-
-        resolved = self._resolve_cmux_target_via_session_store(session_id)
-        if resolved:
-            resolved_workspace, resolved_surface = resolved
-            delivery = self._cmux_deliver_trigger(
-                cli_path,
-                env,
-                resolved_workspace,
-                resolved_surface,
-                trigger,
-                timer_id,
-            )
-            if delivery in ("delivered", "partial"):
-                return
-            if delivery != "stale":
-                return
-
-        self._cmux_new_workspace_fallback(cli_path, env, timer, session_id)
+        return outcome
 
     @staticmethod
     def _cmux_env(callback: Dict[str, Any]) -> Dict[str, str]:
@@ -1584,7 +1602,7 @@ class WakeLiteService:
         env: Dict[str, str],
         timer: Dict[str, Any],
         session_id: str,
-    ) -> None:
+    ) -> bool:
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
         cwd = timer.get("command", {}).get("workingDirectory") or str(Path.home())
@@ -1595,15 +1613,15 @@ class WakeLiteService:
             timeout=10,
         )
         if result is None:
-            return
+            return False
         if result.returncode != 0:
             logger.error("cmux new-workspace fallback failed for timer %s: %s", timer_id, self._cmux_result_text(result))
-            return
+            return False
 
         workspace_id = self._cmux_workspace_id_from_new_workspace(result)
         if not workspace_id:
             logger.error("cmux new-workspace fallback returned no workspace id for timer %s", timer_id)
-            return
+            return False
 
         ready = False
         for attempt in range(10):
@@ -1622,7 +1640,7 @@ class WakeLiteService:
                 "cmux new-workspace fallback did not reach a prompt for timer %s; signal file preserved",
                 timer_id,
             )
-            return
+            return False
 
         # CC-95: type the resume command via argv (no shell, so shlex.quote is unnecessary
         # and would inject literal quote chars). Submit it with an explicit `send-key Enter`
@@ -1638,7 +1656,7 @@ class WakeLiteService:
         if send_resume is None or send_resume.returncode != 0:
             detail = self._cmux_result_text(send_resume) if send_resume is not None else "send did not run"
             logger.error("cmux resume send failed for timer %s: %s", timer_id, detail)
-            return
+            return False
 
         enter_result: Optional[subprocess.CompletedProcess[Any]] = None
         for attempt in range(3):
@@ -1653,7 +1671,7 @@ class WakeLiteService:
                     workspace_id,
                     timer_id,
                 )
-                return
+                return True
             time.sleep(1.0 * (attempt + 1))
 
         detail = self._cmux_result_text(enter_result) if enter_result is not None else "send-key did not run"
@@ -1662,6 +1680,7 @@ class WakeLiteService:
             timer_id,
             detail,
         )
+        return False
 
     def _wezterm_callback(self, callback: Dict[str, Any], message: str, timer: Dict[str, Any],
                           timer_name: str = "", status: str = "",
