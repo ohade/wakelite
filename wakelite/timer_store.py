@@ -161,7 +161,11 @@ class TimerStore:
                     ", ".join(ALLOWED_CALLBACK_TYPES),
                 )
                 timer["callback"] = None
+            elif "amq" in callback and cb_type != "cmux":
+                raise ValueError("callback.amq is only valid for cmux callbacks")
             elif cb_type == "cmux":
+                if "amq" in callback and not isinstance(callback["amq"], bool):
+                    raise ValueError("callback.amq must be a boolean")
                 workspace_id = callback.get("workspace_id")
                 surface_id = callback.get("surface_id")
                 panel_id = callback.get("panel_id")

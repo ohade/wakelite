@@ -19,6 +19,10 @@ from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from .config import (
+    AMQ_BINARY_PATH,
+    AMQ_CALLBACK_PROCESS_TIMEOUT_SECONDS,
+    AMQ_CALLBACK_RECEIPT_TIMEOUT_SECONDS,
+    AMQ_KEEPALIVE_REGISTRY_FILE,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_RETENTION_DAYS,
     LOG_DIR,
@@ -27,6 +31,7 @@ from .config import (
     RUN_LOG_RETENTION_DAYS,
     RUNNER_LOG,
     WAKE_INTENTS_FILE,
+    amq_callback_enabled,
     ensure_dirs,
 )
 from . import capacity
@@ -991,11 +996,13 @@ class WakeLiteService:
         stdout_tail: str,
         callback: Dict[str, Any],
     ) -> None:
-        """Send a short trigger to a cmux surface.
+        """Route a cmux callback through AMQ when opted in, else inject it.
 
         The full callback payload lives in the terminal-neutral signal file.
-        If terminal injection is missing or partial, the signal file is left in
-        place so the next prompt or a manual retrigger can still consume it.
+        AMQ delivery is accepted only after a drained receipt. If AMQ is
+        unavailable, does not drain, or the target is known dead, the existing
+        cmux injection path remains the fallback. The signal file stays in
+        place unless AMQ confirms that the body was drained.
         """
         timer_id = timer.get("id", "unknown")
         timer_name = timer.get("name", timer_id)
@@ -1018,8 +1025,9 @@ class WakeLiteService:
         # workspace_id/surface_id, or stale target with no session-store
         # fallback). Writing first guarantees the data is recoverable on disk
         # regardless of which downstream branch we take.
+        signal_file: Optional[Path] = None
         try:
-            self._write_callback_signal(
+            signal_file = self._write_callback_signal(
                 session_id,
                 run_id,
                 timer_name,
@@ -1055,6 +1063,46 @@ class WakeLiteService:
                     timer_id,
                     run_id,
                 )
+
+        if callback.get("amq"):
+            delivered_via_amq = False
+            amq_message_id: Optional[str] = None
+            if amq_callback_enabled():
+                try:
+                    delivered_via_amq, amq_message_id = self._deliver_cmux_callback_via_amq(
+                        callback,
+                        session_id,
+                        signal_file,
+                    )
+                except Exception:
+                    logger.warning(
+                        "AMQ callback route failed for timer %s run %s; falling back to cmux",
+                        timer_id,
+                        run_id,
+                        exc_info=True,
+                    )
+
+            route = "amq" if delivered_via_amq else "cmux_fallback"
+            logger.info(
+                "callback_route timer_id=%s run_id=%s route=%s amq_message_id=%s",
+                timer_id,
+                run_id,
+                route,
+                amq_message_id or "none",
+            )
+            if delivered_via_amq:
+                if signal_file is not None:
+                    try:
+                        signal_file.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "AMQ drained callback but signal cleanup failed for timer %s run %s: %s",
+                            timer_id,
+                            run_id,
+                            signal_file,
+                            exc_info=True,
+                        )
+                return
 
         if session_id:
             trigger = f"[WakeLite: {timer_name} completed ({status})]"
@@ -1206,6 +1254,136 @@ class WakeLiteService:
         except Exception as exc:
             logger.error("cmux command failed (%s %s): %s", cli_path, " ".join(args[:2]), exc)
             return None
+
+    def _cmux_probe_liveness(
+        self,
+        cli_path: str,
+        env: Dict[str, str],
+        surface_id: str,
+    ) -> str:
+        """Return alive, dead, or unknown for the current cmux surface."""
+        params = json.dumps({"lines": 1, "surface_id": surface_id}, separators=(",", ":"))
+        result = self._cmux_run(cli_path, ["rpc", "surface.read_text", params], env)
+        if result is None:
+            return "unknown"
+        if result.returncode == 0:
+            return "alive"
+        if self._cmux_surface_not_found(result):
+            return "dead"
+        return "unknown"
+
+    @staticmethod
+    def _resolve_amq_mailbox_for_surface(surface_id: str) -> Optional[Tuple[str, str]]:
+        """Resolve one attached AMQ root/recipient for a cmux surface."""
+        try:
+            payload = json.loads(AMQ_KEEPALIVE_REGISTRY_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.info("AMQ keepalive registry unavailable; falling back to cmux", exc_info=True)
+            return None
+
+        entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        target = f"cmux:surface:{surface_id}"
+        identities: set[Tuple[str, str]] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("adapter") != "cmux" or entry.get("target") != target:
+                continue
+            if entry.get("state") != "attached":
+                continue
+            root = entry.get("root")
+            recipient = entry.get("agent")
+            if not isinstance(root, str) or not isinstance(recipient, str):
+                continue
+            root_path = Path(root)
+            if not root_path.is_absolute() or not (root_path / "agents" / recipient).is_dir():
+                continue
+            identities.add((str(root_path), recipient))
+
+        if len(identities) != 1:
+            logger.warning(
+                "AMQ identity resolution for surface %s found %d attached mailboxes; falling back to cmux",
+                surface_id,
+                len(identities),
+            )
+            return None
+        return next(iter(identities))
+
+    def _deliver_cmux_callback_via_amq(
+        self,
+        callback: Dict[str, Any],
+        session_id: Optional[str],
+        signal_file: Optional[Path],
+    ) -> Tuple[bool, Optional[str]]:
+        """Attempt AMQ delivery and require an explicit drained receipt."""
+        if not session_id or signal_file is None:
+            return False, None
+
+        resolved = self._resolve_cmux_target_via_session_store(session_id)
+        if not resolved:
+            return False, None
+        _, surface_id = resolved
+
+        mailbox = self._resolve_amq_mailbox_for_surface(surface_id)
+        if not mailbox:
+            return False, None
+        root, recipient = mailbox
+
+        cli_path = self._resolve_cmux_cli_path(callback)
+        if cli_path:
+            liveness = self._cmux_probe_liveness(cli_path, self._cmux_env(callback), surface_id)
+            if liveness == "dead":
+                logger.info("AMQ callback target surface %s is dead; falling back to cmux", surface_id)
+                return False, None
+
+        result = subprocess.run(
+            [
+                AMQ_BINARY_PATH,
+                "send",
+                "--root",
+                root,
+                "--ignore-session-pin",
+                "--me",
+                recipient,
+                "--to",
+                recipient,
+                "--allow-self",
+                "--body",
+                f"@{signal_file}",
+                "--strict",
+                "--json",
+                "--wait-for",
+                "drained",
+                "--wait-timeout",
+                f"{AMQ_CALLBACK_RECEIPT_TIMEOUT_SECONDS}s",
+            ],
+            timeout=AMQ_CALLBACK_PROCESS_TIMEOUT_SECONDS,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        parsed: Dict[str, Any] = {}
+        try:
+            candidate = json.loads(result.stdout)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except json.JSONDecodeError as exc:
+            logger.warning("Unable to parse AMQ callback JSON response: %s", exc)
+        message_id = parsed.get("id") if isinstance(parsed.get("id"), str) else None
+        wait = parsed.get("wait") if isinstance(parsed.get("wait"), dict) else {}
+        drained = (
+            result.returncode == 0
+            and wait.get("event") == "matched"
+            and wait.get("stage") == "drained"
+        )
+        if not drained:
+            logger.warning(
+                "AMQ callback did not receive a drained receipt (id=%s returncode=%s); falling back to cmux",
+                message_id or "none",
+                result.returncode,
+            )
+        return drained, message_id
 
     def _cmux_deliver_trigger(
         self,

@@ -35,8 +35,21 @@ DEFAULT_HORIZON_DAYS = 21
 
 MAX_WORKERS = 16
 
+AMQ_BINARY_PATH = "/opt/homebrew/bin/amq"
+AMQ_CALLBACK_RECEIPT_TIMEOUT_SECONDS = 20
+AMQ_CALLBACK_PROCESS_TIMEOUT_SECONDS = 25
+AMQ_KEEPALIVE_REGISTRY_FILE = Path.home() / ".amq-keepalive" / "registry.json"
+
 CLAUDE_MCP_CONFIG = Path.home() / ".mcp.json"
 CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+
+
+def amq_callback_enabled() -> bool:
+    """Return whether the opt-in AMQ callback route is enabled globally."""
+    raw = os.environ.get("WAKELITE_AMQ_CALLBACK_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("false", "0", "no", "off", "disabled")
 
 
 def ensure_dirs() -> None:
