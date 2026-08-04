@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import uuid
@@ -39,13 +40,13 @@ class TimerStore:
 
     def list_timers(self) -> List[Dict]:
         with self._lock:
-            return list(self._data["timers"])
+            return [copy.deepcopy(timer) for timer in self._data["timers"]]
 
     def get_timer(self, timer_id: str) -> Optional[Dict]:
         with self._lock:
             for timer in self._data["timers"]:
                 if timer["id"] == timer_id:
-                    return dict(timer)
+                    return copy.deepcopy(timer)
         return None
 
     def _validate_timer(self, timer: Dict) -> None:

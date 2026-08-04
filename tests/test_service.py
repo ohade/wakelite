@@ -62,6 +62,27 @@ def _basic_timer(name: str, shell: str = "echo ok"):
     }
 
 
+class TimerStoreIsolationTests(unittest.TestCase):
+    def test_list_and_get_return_copies(self):
+        with tempfile.TemporaryDirectory() as td:
+            _bootstrap(td)
+            import wakelite.timer_store as ts
+
+            store = ts.TimerStore()
+            timer = store.create_timer(_basic_timer("copy-isolation"))
+
+            listed = store.list_timers()
+            listed[0]["name"] = "mutated"
+            listed[0]["command"]["shell"] = "echo mutated"
+
+            stored = store.get_timer(timer["id"])
+            self.assertEqual(stored["name"], "copy-isolation")
+            self.assertEqual(stored["command"]["shell"], "echo ok")
+
+            stored["name"] = "mutated-again"
+            self.assertEqual(store.get_timer(timer["id"])["name"], "copy-isolation")
+
+
 class ServiceTests(unittest.TestCase):
     def test_list_runs_includes_logs_url_and_has_logs(self):
         with tempfile.TemporaryDirectory() as td:
