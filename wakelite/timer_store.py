@@ -239,6 +239,20 @@ class TimerStore:
             )
         with self._lock:
             now = datetime.now(timezone.utc).isoformat()
+            callback = payload.get("callback")
+            if isinstance(callback, dict):
+                callback = dict(callback)
+                session_id = callback.get("session_id")
+                if (
+                    callback.get("type") == "cmux"
+                    and isinstance(session_id, str)
+                    and session_id.strip()
+                    and "amq" not in callback
+                ):
+                    # New resumable cmux timers prefer the durable AMQ route.
+                    # This creation-only default deliberately leaves persisted
+                    # legacy timers unchanged and preserves explicit opt-out.
+                    callback["amq"] = True
             timer = {
                 "id": payload.get("id") or str(uuid.uuid4()),
                 "name": payload.get("name", "timer"),
@@ -252,7 +266,7 @@ class TimerStore:
                 "resources": payload.get("resources", []),
                 "max_runs": payload.get("max_runs"),
                 "until": payload.get("until"),
-                "callback": payload.get("callback"),
+                "callback": callback,
                 "wake": payload.get(
                     "wake",
                     {"enabled": False, "action": "wake", "leadMinutes": 0},
