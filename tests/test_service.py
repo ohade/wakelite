@@ -1485,6 +1485,61 @@ class GhosttyCallbackTests(unittest.TestCase):
 class CmuxCallbackTests(unittest.TestCase):
     """Tests for the cmux callback feature."""
 
+    def test_new_resumable_cmux_callback_defaults_to_amq(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+
+            timer = svc.timer_store.create_timer(
+                _cmux_callback_timer("cmux-amq-default", cli_path=cmux)
+            )
+
+            self.assertIs(timer["callback"]["amq"], True)
+
+    def test_new_cmux_callback_preserves_explicit_amq_opt_out(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            payload = _cmux_callback_timer("cmux-amq-opt-out", cli_path=cmux)
+            payload["callback"]["amq"] = False
+
+            timer = svc.timer_store.create_timer(payload)
+
+            self.assertIs(timer["callback"]["amq"], False)
+
+    def test_new_cmux_callback_without_session_id_does_not_default_to_amq(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            payload = _cmux_callback_timer("cmux-no-session", cli_path=cmux)
+            payload["callback"].pop("session_id")
+
+            timer = svc.timer_store.create_timer(payload)
+
+            self.assertNotIn("amq", timer["callback"])
+
+    def test_replace_all_preserves_legacy_cmux_callback_without_amq(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            legacy = _cmux_callback_timer("legacy-cmux", cli_path=cmux)
+            legacy.update(
+                {
+                    "id": "legacy-cmux-id",
+                    "created_at": "2026-08-01T00:00:00+00:00",
+                    "updated_at": "2026-08-01T00:00:00+00:00",
+                }
+            )
+
+            svc.timer_store.replace_all([legacy])
+
+            stored = svc.timer_store.get_timer("legacy-cmux-id")
+            self.assertNotIn("amq", stored["callback"])
+
     def test_callback_schema_accepts_cmux(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
