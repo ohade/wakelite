@@ -359,9 +359,11 @@ def main() -> None:
     "slackActivity": true                       #   false = no Slack lifecycle thread/messages
   },
   "callback": {                                 # optional — reconnect results to terminal
-    "type": "wezterm",                          #   only "wezterm" supported (v1)
-    "pane_id": 11,                              #   auto-captured from $WEZTERM_PANE if missing
-    "session_id": "abc-def-123"                 #   Claude Code session for --resume fallback
+    "type": "cmux",                             #   "cmux", "ghostty", or "wezterm"
+    "workspace_id": "workspace-uuid",           #   cmux workspace identity
+    "surface_id": "surface-uuid",               #   exact cmux surface identity
+    "session_id": "abc-def-123",                #   resumable Claude/Codex session identity
+    "amq": true                                  #   cmux+session defaults true at creation; false opts out
   }
 }
 
