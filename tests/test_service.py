@@ -1275,7 +1275,7 @@ def _write_amq_callback_identity(
             "entries": [{
                 "adapter": "cmux",
                 "target": f"cmux:surface:{surface_id}",
-                "state": "attached",
+                "state": "active",
                 "root": str(root),
                 "agent": recipient,
             }],
@@ -1540,6 +1540,12 @@ class CmuxCallbackTests(unittest.TestCase):
             stored = svc.timer_store.get_timer("legacy-cmux-id")
             self.assertNotIn("amq", stored["callback"])
 
+            updated = svc.timer_store.update_timer(
+                "legacy-cmux-id",
+                {"name": "legacy-cmux-updated"},
+            )
+            self.assertNotIn("amq", updated["callback"])
+
     def test_callback_schema_accepts_cmux(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
@@ -1613,7 +1619,10 @@ class CmuxCallbackTests(unittest.TestCase):
             svc = WakeLiteService(tick_seconds=1)
             cmux = _make_executable(Path(td) / "cmux")
             root = _write_amq_callback_identity(td)
-            timer = _cmux_callback_timer("cmux-amq-success", cli_path=cmux, amq=True)
+            timer = svc.timer_store.create_timer(
+                _cmux_callback_timer("cmux-amq-success", cli_path=cmux)
+            )
+            self.assertIs(timer["callback"]["amq"], True)
             observed = {}
 
             def side_effect(args, **kwargs):
@@ -1836,8 +1845,8 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertEqual(calls[0][1], "send")
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
 
-    def test_amq_ambiguous_or_detached_identity_fails_closed_to_cmux(self):
-        for case in ("ambiguous", "detached"):
+    def test_amq_ambiguous_or_inactive_identity_fails_closed_to_cmux(self):
+        for case in ("ambiguous", "attached", "detached"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
                 WakeLiteService = _bootstrap(td)
                 svc = WakeLiteService(tick_seconds=1)
@@ -1845,8 +1854,8 @@ class CmuxCallbackTests(unittest.TestCase):
                 _write_amq_callback_identity(td)
                 registry = Path(td) / ".amq-keepalive" / "registry.json"
                 payload = json.loads(registry.read_text(encoding="utf-8"))
-                if case == "detached":
-                    payload["entries"][0]["state"] = "detached"
+                if case in ("attached", "detached"):
+                    payload["entries"][0]["state"] = case
                 else:
                     second_root = Path(td) / "amq-root-second"
                     (second_root / "agents" / "claude").mkdir(parents=True)

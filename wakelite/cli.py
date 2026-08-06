@@ -362,8 +362,8 @@ def main() -> None:
     "type": "cmux",                             #   "cmux", "ghostty", or "wezterm"
     "workspace_id": "workspace-uuid",           #   cmux workspace identity
     "surface_id": "surface-uuid",               #   exact cmux surface identity
-    "session_id": "abc-def-123",                #   resumable Claude/Codex session identity
-    "amq": true                                  #   cmux+session defaults true at creation; false opts out
+    "session_id": "abc-def-123",                #   Claude Code session ID used for identity/resume
+    "amq": true                                 #   cmux+session defaults true at creation; false opts out
   }
 }
 
