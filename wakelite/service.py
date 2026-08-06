@@ -1312,7 +1312,7 @@ class WakeLiteService:
 
     @staticmethod
     def _resolve_amq_mailbox_for_surface(surface_id: str) -> Optional[Tuple[str, str]]:
-        """Resolve one attached AMQ root/recipient for a cmux surface."""
+        """Resolve one active AMQ root/recipient for a cmux surface."""
         try:
             payload = json.loads(AMQ_KEEPALIVE_REGISTRY_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1327,7 +1327,10 @@ class WakeLiteService:
                 continue
             if entry.get("adapter") != "cmux" or entry.get("target") != target:
                 continue
-            if entry.get("state") != "attached":
+            # Keepalive persists "active" only after StartWake succeeds.
+            # "attached" is its retry/backoff state, so routing there would
+            # store a message without a live doorbell and skip cmux fallback.
+            if entry.get("state") != "active":
                 continue
             root = entry.get("root")
             recipient = entry.get("agent")
@@ -1340,7 +1343,7 @@ class WakeLiteService:
 
         if len(identities) != 1:
             logger.warning(
-                "AMQ identity resolution for surface %s found %d attached mailboxes; falling back to cmux",
+                "AMQ identity resolution for surface %s found %d active mailboxes; falling back to cmux",
                 surface_id,
                 len(identities),
             )
