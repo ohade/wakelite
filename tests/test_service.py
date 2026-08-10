@@ -9,7 +9,7 @@ import unittest.mock
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 from unittest.mock import patch
 
 
@@ -1343,6 +1343,30 @@ def _write_amq_callback_identity(
     return root
 
 
+def _is_amq_wake_check(args) -> bool:
+    return args[:3] == ["/opt/homebrew/bin/amq", "wake", "check"]
+
+
+def _amq_wake_check_result(
+    args,
+    *,
+    returncode: int = 0,
+    status: str = "valid",
+    live: bool = True,
+    stdout: Optional[str] = None,
+):
+    root = args[args.index("--root") + 1]
+    recipient = args[args.index("--me") + 1]
+    if stdout is None:
+        stdout = json.dumps({
+            "schema": 2,
+            "root": root,
+            "agent": recipient,
+            "wake": {"status": status, "live": live},
+        })
+    return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr="")
+
+
 class CallbackTests(unittest.TestCase):
     """Tests for the WezTerm callback feature."""
 
@@ -1686,6 +1710,10 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    observed["wake_argv"] = args
+                    observed["wake_kwargs"] = kwargs
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     signal_arg = args[args.index("--body") + 1]
                     observed["argv"] = args
@@ -1717,6 +1745,12 @@ class CmuxCallbackTests(unittest.TestCase):
             ]
             self.assertEqual(observed["argv"], expected)
             self.assertEqual(observed["kwargs"]["timeout"], 5)
+            self.assertEqual(observed["wake_argv"], [
+                "/opt/homebrew/bin/amq", "wake", "check",
+                "--root", str(root), "--me", "claude",
+                "--json", "--json-schema=2",
+            ])
+            self.assertEqual(observed["wake_kwargs"]["timeout"], 5)
             payload = json.loads(observed["body"])
             self.assertEqual(payload["run_id"], "run-amq-sent")
             self.assertEqual(payload["stdout_tail"], "payload-from-run")
@@ -1748,6 +1782,8 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     return subprocess.CompletedProcess(
                         args,
@@ -1877,6 +1913,8 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     return subprocess.CompletedProcess(
                         args,
@@ -1917,6 +1955,8 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     return subprocess.CompletedProcess(
                         args,
@@ -1970,6 +2010,8 @@ class CmuxCallbackTests(unittest.TestCase):
                 def side_effect(args, **kwargs):
                     if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                         return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                    if _is_amq_wake_check(args):
+                        return _amq_wake_check_result(args)
                     if args[0] == "/opt/homebrew/bin/amq":
                         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
                     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -2005,11 +2047,11 @@ class CmuxCallbackTests(unittest.TestCase):
 
             calls = [call.args[0] for call in mock_run.call_args_list]
             self.assertFalse(any(args and args[0] == "/opt/homebrew/bin/amq" for args in calls))
-            self.assertEqual(calls[0][1], "send")
+            self.assertTrue(any(args[0] == cmux and args[1] == "send" for args in calls))
             self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
 
-    def test_amq_ambiguous_or_inactive_identity_fails_closed_to_cmux(self):
-        for case in ("ambiguous", "attached", "detached"):
+    def test_amq_ambiguous_or_detached_identity_fails_closed_to_cmux(self):
+        for case in ("ambiguous", "detached"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
                 WakeLiteService = _bootstrap(td)
                 svc = WakeLiteService(tick_seconds=1)
@@ -2017,7 +2059,7 @@ class CmuxCallbackTests(unittest.TestCase):
                 _write_amq_callback_identity(td)
                 registry = Path(td) / ".amq-keepalive" / "registry.json"
                 payload = json.loads(registry.read_text(encoding="utf-8"))
-                if case in ("attached", "detached"):
+                if case == "detached":
                     payload["entries"][0]["state"] = case
                 else:
                     second_root = Path(td) / "amq-root-second"
@@ -2042,7 +2084,126 @@ class CmuxCallbackTests(unittest.TestCase):
                 self.assertFalse(
                     any(args and args[0] == "/opt/homebrew/bin/amq" for args in calls)
                 )
-                self.assertEqual(calls[0][1], "send")
+                self.assertTrue(any(args[0] == cmux and args[1] == "send" for args in calls))
+                self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+
+    def test_amq_attached_identity_with_live_official_wake_routes(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            root = _write_amq_callback_identity(td)
+            registry = Path(td) / ".amq-keepalive" / "registry.json"
+            payload = json.loads(registry.read_text(encoding="utf-8"))
+            payload["entries"][0].update({
+                "state": "attached",
+                "decision": "start_failed",
+                "last_error": "owner-bound wake cannot be claimed by supervisor",
+            })
+            registry.write_text(json.dumps(payload), encoding="utf-8")
+            timer = _cmux_callback_timer(
+                "cmux-amq-attached-live", cli_path=cmux, amq=True
+            )
+
+            def side_effect(args, **kwargs):
+                if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
+                if args[:2] == ["/opt/homebrew/bin/amq", "send"]:
+                    return subprocess.CompletedProcess(
+                        args, 0, stdout=json.dumps({"id": "msg-attached-live"}), stderr=""
+                    )
+                raise AssertionError(f"direct cmux injection must not run: {args}")
+
+            with patch(
+                "wakelite.service.subprocess.run", side_effect=side_effect
+            ) as mock_run:
+                svc._execute_callback(
+                    timer, "success", 0, "run-attached-live", _stdout_file(td), 1.0
+                )
+
+            calls = [call.args[0] for call in mock_run.call_args_list]
+            self.assertIn(
+                [
+                    "/opt/homebrew/bin/amq", "wake", "check",
+                    "--root", str(root), "--me", "claude",
+                    "--json", "--json-schema=2",
+                ],
+                calls,
+            )
+            self.assertTrue(
+                any(args[:2] == ["/opt/homebrew/bin/amq", "send"] for args in calls)
+            )
+            self.assertFalse(any(args[0] == cmux and args[1] == "send" for args in calls))
+            self.assertFalse(_cmux_signal_files(td, "sess-cmux"))
+
+    def test_amq_wake_check_failure_falls_back_and_preserves_signal(self):
+        cases = (
+            "not-live",
+            "nonzero",
+            "non-object",
+            "malformed",
+            "wrong-identity",
+            "timeout",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                WakeLiteService = _bootstrap(td)
+                svc = WakeLiteService(tick_seconds=1)
+                cmux = _make_executable(Path(td) / "cmux")
+                _write_amq_callback_identity(td)
+                timer = _cmux_callback_timer(
+                    f"cmux-amq-wake-{case}", cli_path=cmux, amq=True
+                )
+
+                def side_effect(args, **kwargs):
+                    if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
+                        return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                    if _is_amq_wake_check(args):
+                        if case == "not-live":
+                            return _amq_wake_check_result(
+                                args, status="missing", live=False
+                            )
+                        if case == "nonzero":
+                            return _amq_wake_check_result(args, returncode=1)
+                        if case == "non-object":
+                            return _amq_wake_check_result(args, stdout="[]")
+                        if case == "malformed":
+                            return _amq_wake_check_result(args, stdout="not-json")
+                        if case == "wrong-identity":
+                            return _amq_wake_check_result(
+                                args,
+                                stdout=json.dumps({
+                                    "schema": 2,
+                                    "root": "/wrong/root",
+                                    "agent": "wrong-agent",
+                                    "wake": {"status": "valid", "live": True},
+                                }),
+                            )
+                        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+                    if args[:2] == ["/opt/homebrew/bin/amq", "send"]:
+                        raise AssertionError("unusable wake must not receive AMQ send")
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+                with patch(
+                    "wakelite.service.subprocess.run", side_effect=side_effect
+                ) as mock_run, self.assertLogs("wakelite.service", level="WARNING"):
+                    svc._execute_callback(
+                        timer,
+                        "success",
+                        0,
+                        f"run-wake-{case}",
+                        _stdout_file(td),
+                        1.0,
+                    )
+
+                calls = [call.args[0] for call in mock_run.call_args_list]
+                self.assertEqual(sum(_is_amq_wake_check(args) for args in calls), 1)
+                self.assertFalse(
+                    any(args[:2] == ["/opt/homebrew/bin/amq", "send"] for args in calls)
+                )
+                self.assertTrue(any(args[0] == cmux and args[1] == "send" for args in calls))
                 self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
 
     def test_amq_send_timeout_uses_send_scoped_backstop(self):
@@ -2057,6 +2218,8 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     amq_timeouts.append(kwargs["timeout"])
                     raise subprocess.TimeoutExpired(args, kwargs["timeout"])
@@ -2071,7 +2234,7 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertEqual(amq_timeouts, [5])
             amq_call = next(
                 args for args in (call.args[0] for call in mock_run.call_args_list)
-                if args[0] == "/opt/homebrew/bin/amq"
+                if args[:2] == ["/opt/homebrew/bin/amq", "send"]
             )
             self.assertNotIn("--wait-for", amq_call)
             self.assertNotIn("--wait-timeout", amq_call)
@@ -2091,6 +2254,8 @@ class CmuxCallbackTests(unittest.TestCase):
             def side_effect(args, **kwargs):
                 if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
                     raise subprocess.TimeoutExpired(args, 5)
+                if _is_amq_wake_check(args):
+                    return _amq_wake_check_result(args)
                 if args[0] == "/opt/homebrew/bin/amq":
                     return subprocess.CompletedProcess(
                         args,

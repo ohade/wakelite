@@ -1313,8 +1313,82 @@ class WakeLiteService:
         return "unknown"
 
     @staticmethod
-    def _resolve_amq_mailbox_for_surface(surface_id: str) -> Optional[Tuple[str, str]]:
-        """Resolve one active AMQ root/recipient for a cmux surface."""
+    def _amq_wake_is_live(root: str, recipient: str) -> bool:
+        """Use AMQ's public wake-check contract to verify the mailbox doorbell."""
+        args = [
+            AMQ_BINARY_PATH,
+            "wake",
+            "check",
+            "--root",
+            root,
+            "--me",
+            recipient,
+            "--json",
+            "--json-schema=2",
+        ]
+        try:
+            result = subprocess.run(
+                args,
+                timeout=AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "AMQ wake check failed for recipient %s at %s: %s; falling back to cmux",
+                recipient,
+                root,
+                exc,
+            )
+            return False
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Unable to parse AMQ wake-check JSON for recipient %s at %s: %s; "
+                "falling back to cmux",
+                recipient,
+                root,
+                exc,
+            )
+            return False
+
+        if not isinstance(payload, dict):
+            logger.warning(
+                "AMQ wake-check JSON was not an object for recipient %s at %s; "
+                "falling back to cmux",
+                recipient,
+                root,
+            )
+            return False
+
+        wake = payload.get("wake")
+        accepted = (
+            result.returncode == 0
+            and payload.get("schema") == 2
+            and payload.get("root") == root
+            and payload.get("agent") == recipient
+            and isinstance(wake, dict)
+            and wake.get("status") == "valid"
+            and wake.get("live") is True
+        )
+        if not accepted:
+            logger.warning(
+                "AMQ wake is not live and valid for recipient %s at %s "
+                "(returncode=%s status=%s live=%s); falling back to cmux",
+                recipient,
+                root,
+                result.returncode,
+                wake.get("status") if isinstance(wake, dict) else None,
+                wake.get("live") if isinstance(wake, dict) else None,
+            )
+        return accepted
+
+    @classmethod
+    def _resolve_amq_mailbox_for_surface(cls, surface_id: str) -> Optional[Tuple[str, str]]:
+        """Resolve one registered mailbox whose official AMQ wake is live."""
         try:
             payload = json.loads(AMQ_KEEPALIVE_REGISTRY_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1329,10 +1403,11 @@ class WakeLiteService:
                 continue
             if entry.get("adapter") != "cmux" or entry.get("target") != target:
                 continue
-            # Keepalive persists "active" only after StartWake succeeds.
-            # "attached" is its retry/backoff state, so routing there would
-            # store a message without a live doorbell and skip cmux fallback.
-            if entry.get("state") != "active":
+            # Keepalive can report "attached" when its supervisor cannot
+            # manage an owner-bound wake even though that wake is still live.
+            # The registry selects the mailbox; AMQ's public wake-check result
+            # below, rather than the supervisor state, proves the doorbell.
+            if entry.get("state") not in ("active", "attached"):
                 continue
             root = entry.get("root")
             recipient = entry.get("agent")
@@ -1345,12 +1420,15 @@ class WakeLiteService:
 
         if len(identities) != 1:
             logger.warning(
-                "AMQ identity resolution for surface %s found %d active mailboxes; falling back to cmux",
+                "AMQ identity resolution for surface %s found %d registered mailboxes; falling back to cmux",
                 surface_id,
                 len(identities),
             )
             return None
-        return next(iter(identities))
+        root, recipient = next(iter(identities))
+        if not cls._amq_wake_is_live(root, recipient):
+            return None
+        return root, recipient
 
     def _deliver_cmux_callback_via_amq(
         self,
@@ -1405,16 +1483,16 @@ class WakeLiteService:
                 surface_id,
             )
 
-        mailbox = self._resolve_amq_mailbox_for_surface(surface_id)
-        if not mailbox:
-            return False, None
-        root, recipient = mailbox
-
         if resolved and cli_path:
             liveness = self._cmux_probe_liveness(cli_path, self._cmux_env(callback), surface_id)
             if liveness == "dead":
                 logger.info("AMQ callback target surface %s is dead; falling back to cmux", surface_id)
                 return False, None
+
+        mailbox = self._resolve_amq_mailbox_for_surface(surface_id)
+        if not mailbox:
+            return False, None
+        root, recipient = mailbox
 
         result = subprocess.run(
             [
