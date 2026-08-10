@@ -1363,17 +1363,54 @@ class WakeLiteService:
             return False, None
 
         resolved = self._resolve_cmux_target_via_session_store(session_id)
-        if not resolved:
-            return False, None
-        _, surface_id = resolved
+        cli_path = self._resolve_cmux_cli_path(callback)
+        if resolved:
+            _, surface_id = resolved
+        else:
+            # Codex does not run Claude's cmux session-store hook, so a valid
+            # Codex callback has no entry in claude-hook-sessions.json. In that
+            # case the timer's captured target is usable only after a fresh,
+            # affirmative liveness probe. Unknown is deliberately insufficient:
+            # without either the session store or a live surface, routing would
+            # suppress the direct cmux fallback and could strand the callback.
+            workspace_id = callback.get("workspace_id")
+            surface_id = callback.get("surface_id")
+            if (
+                not isinstance(workspace_id, str)
+                or not workspace_id
+                or not isinstance(surface_id, str)
+                or not surface_id
+                or not cli_path
+            ):
+                return False, None
+            liveness = self._cmux_probe_liveness(
+                cli_path,
+                self._cmux_env(callback),
+                surface_id,
+            )
+            if liveness != "alive":
+                logger.info(
+                    "AMQ callback session-store miss for session %s and captured "
+                    "surface %s is %s; falling back to cmux",
+                    session_id,
+                    surface_id,
+                    liveness,
+                )
+                return False, None
+            logger.info(
+                "AMQ callback session-store miss for session %s; using live "
+                "captured workspace=%s surface=%s",
+                session_id,
+                workspace_id,
+                surface_id,
+            )
 
         mailbox = self._resolve_amq_mailbox_for_surface(surface_id)
         if not mailbox:
             return False, None
         root, recipient = mailbox
 
-        cli_path = self._resolve_cmux_cli_path(callback)
-        if cli_path:
+        if resolved and cli_path:
             liveness = self._cmux_probe_liveness(cli_path, self._cmux_env(callback), surface_id)
             if liveness == "dead":
                 logger.info("AMQ callback target surface %s is dead; falling back to cmux", surface_id)

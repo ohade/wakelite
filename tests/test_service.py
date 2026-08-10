@@ -1726,6 +1726,111 @@ class CmuxCallbackTests(unittest.TestCase):
             self.assertIn("outcome=amq-sent", route_log)
             self.assertIn("amq_message_id=msg-sent-1", route_log)
 
+    def test_amq_session_store_miss_uses_live_captured_codex_surface(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            cmux = _make_executable(Path(td) / "cmux")
+            root = _write_amq_callback_identity(
+                td, workspace_id="ws-codex", surface_id="sf-codex"
+            )
+            cmux_dir = Path(td) / ".cmuxterm"
+            (cmux_dir / "claude-hook-sessions.json").unlink()
+            (cmux_dir / "claude-hook-sessions.json.lock").unlink()
+            timer = _cmux_callback_timer(
+                "cmux-amq-codex-store-miss",
+                workspace_id="ws-codex",
+                surface_id="sf-codex",
+                cli_path=cmux,
+                amq=True,
+            )
+
+            def side_effect(args, **kwargs):
+                if args[0] == cmux and args[1:3] == ["rpc", "surface.read_text"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="$ ", stderr="")
+                if args[0] == "/opt/homebrew/bin/amq":
+                    return subprocess.CompletedProcess(
+                        args,
+                        0,
+                        stdout=json.dumps({"id": "msg-codex-live"}),
+                        stderr="",
+                    )
+                raise AssertionError(f"direct cmux injection must not run: {args}")
+
+            with patch(
+                "wakelite.service.subprocess.run", side_effect=side_effect
+            ) as mock_run, self.assertLogs("wakelite.service", level="INFO") as logs:
+                svc._execute_callback(
+                    timer, "success", 0, "run-codex-live", _stdout_file(td), 1.0
+                )
+
+            amq_call = next(
+                call.args[0]
+                for call in mock_run.call_args_list
+                if call.args[0][0] == "/opt/homebrew/bin/amq"
+            )
+            self.assertEqual(amq_call[amq_call.index("--root") + 1], str(root))
+            self.assertFalse(_cmux_signal_files(td, "sess-cmux"))
+            log_text = "\n".join(logs.output)
+            self.assertIn(
+                "using live captured workspace=ws-codex surface=sf-codex",
+                log_text,
+            )
+            self.assertIn("route=amq", log_text)
+            self.assertIn("amq_message_id=msg-codex-live", log_text)
+
+    def test_amq_session_store_miss_rejects_unproven_captured_surface(self):
+        for liveness in ("dead", "unknown"):
+            with self.subTest(liveness=liveness), tempfile.TemporaryDirectory() as td:
+                WakeLiteService = _bootstrap(td)
+                svc = WakeLiteService(tick_seconds=1)
+                cmux = _make_executable(Path(td) / "cmux")
+                _write_amq_callback_identity(
+                    td, workspace_id="ws-codex", surface_id="sf-codex"
+                )
+                cmux_dir = Path(td) / ".cmuxterm"
+                (cmux_dir / "claude-hook-sessions.json").unlink()
+                (cmux_dir / "claude-hook-sessions.json.lock").unlink()
+                timer = _cmux_callback_timer(
+                    f"cmux-amq-codex-{liveness}",
+                    workspace_id="ws-codex",
+                    surface_id="sf-codex",
+                    cli_path=cmux,
+                    amq=True,
+                )
+
+                def side_effect(args, **kwargs):
+                    if args[0] == "/opt/homebrew/bin/amq":
+                        raise AssertionError("unproven captured target must not use AMQ")
+                    if args[1:3] == ["rpc", "surface.read_text"]:
+                        if liveness == "unknown":
+                            raise subprocess.TimeoutExpired(args, 5)
+                        return subprocess.CompletedProcess(
+                            args, 1, stdout="", stderr="surface not found"
+                        )
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+                with patch(
+                    "wakelite.service.subprocess.run", side_effect=side_effect
+                ) as mock_run:
+                    svc._execute_callback(
+                        timer,
+                        "success",
+                        0,
+                        f"run-codex-{liveness}",
+                        _stdout_file(td),
+                        1.0,
+                    )
+
+                calls = [call.args[0] for call in mock_run.call_args_list]
+                self.assertFalse(
+                    any(args[0] == "/opt/homebrew/bin/amq" for args in calls)
+                )
+                self.assertTrue(
+                    any(args[0] == cmux and args[1] == "send" for args in calls)
+                )
+                self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+
     def test_amq_dead_target_uses_existing_new_workspace_fallback(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)
