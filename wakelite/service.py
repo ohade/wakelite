@@ -63,6 +63,7 @@ class WakeLiteService:
         )
         self.tick_seconds = tick_seconds
         self.max_workers = max_workers
+        self._started_monotonic = time.monotonic()
         self.timer_store = TimerStore()
         self.state = StateStore()
         self.notifier = Notifier()
@@ -148,9 +149,9 @@ class WakeLiteService:
     def health(self) -> Dict[str, Any]:
         timers = self.timer_store.list_timers()
         enabled = [t for t in timers if t.get("enabled", True)]
-        incidents = self.state.list_incidents(limit=10, include_acked=False)
         heartbeat = self.state.get_meta("runner.heartbeat")
         active_runs = self.state.count_active_runs()
+        unacked_incidents = self.state.count_unacked_incidents()
         daemon_count = sum(1 for t in enabled if t.get("timer_type") == "daemon")
         interval_count = sum(1 for t in enabled if t.get("recurrence", {}).get("frequency") == "interval" and t.get("timer_type") != "daemon")
 
@@ -165,9 +166,10 @@ class WakeLiteService:
             "interval_count": interval_count,
             "active_runs": active_runs,
             "max_workers": self.max_workers,
+            "uptime_seconds": max(0.0, time.monotonic() - self._started_monotonic),
             "notifications_muted": self.notifier.muted,
             "notifications_mute_last_change": mute_changes[0] if mute_changes else None,
-            "unacked_incidents": len(incidents),
+            "unacked_incidents": unacked_incidents,
             "runner_heartbeat": heartbeat,
             "now": datetime.now(timezone.utc).isoformat(),
         }

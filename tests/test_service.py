@@ -85,6 +85,43 @@ class TimerStoreIsolationTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_health_reports_monotonic_uptime_and_incident_contract(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            import wakelite.service as service_module
+
+            with patch.object(
+                service_module.time,
+                "monotonic",
+                side_effect=[1000.0, 1005.0, 1065.25],
+            ):
+                svc = WakeLiteService(tick_seconds=1)
+                incident_ids = [
+                    svc.state.add_incident(
+                        "warn", "test", f"unacknowledged incident {index}"
+                    )
+                    for index in range(1001)
+                ]
+                first_health = svc.health()
+                svc.state.ack_incident(incident_ids[0])
+                second_health = svc.health()
+
+            self.assertEqual(first_health["uptime_seconds"], 5.0)
+            self.assertEqual(second_health["uptime_seconds"], 65.25)
+            self.assertGreaterEqual(
+                second_health["uptime_seconds"], first_health["uptime_seconds"]
+            )
+            self.assertEqual(first_health["unacked_incidents"], 1001)
+            self.assertEqual(second_health["unacked_incidents"], 1000)
+            self.assertNotIn("unacknowledged_incidents", second_health)
+            index_names = {
+                row["name"]
+                for row in svc.state._connect()
+                .execute("PRAGMA index_list('incidents')")
+                .fetchall()
+            }
+            self.assertIn("idx_incidents_acknowledged", index_names)
+
     def test_list_runs_includes_logs_url_and_has_logs(self):
         with tempfile.TemporaryDirectory() as td:
             WakeLiteService = _bootstrap(td)

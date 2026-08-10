@@ -106,6 +106,9 @@ pmset -g sched  # Should show wake entries by 'com.wakelite'
 
 ## Testing
 
+The full suite requires Python 3.9+ and Node.js 18+; Node executes the dashboard's
+inline JavaScript contract tests.
+
 ```bash
 PYTHONPATH=. python -m pytest tests/ -v
 ```
@@ -114,6 +117,7 @@ PYTHONPATH=. python -m pytest tests/ -v
 
 - macOS (tested on Apple Silicon)
 - Python 3.9+
+- Node.js 18+ (for the full test suite)
 - Optional: `rumps` for menu bar app
 
 ## License

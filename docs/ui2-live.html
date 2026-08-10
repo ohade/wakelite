@@ -777,6 +777,31 @@ function formatUptimeSub(seconds) {
   return 'Since ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+function parseNonNegativeMetric(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function parseNonNegativeIntegerMetric(value) {
+  const parsed = parseNonNegativeMetric(value);
+  return parsed !== null && Number.isInteger(parsed) ? parsed : null;
+}
+
+function renderHealthMetrics(health) {
+  const incidents = parseNonNegativeIntegerMetric(health.unacked_incidents);
+  el('metricIncidents').textContent = incidents === null ? 'Unavailable' : incidents;
+  el('metricIncidentsCard').classList.toggle('danger', incidents !== null && incidents > 0);
+  el('metricIncidentsSub').textContent = incidents === null ? 'Runner did not report incidents' : (incidents > 0 ? 'Unacknowledged' : 'None');
+
+  const uptimeSeconds = parseNonNegativeMetric(health.uptime_seconds);
+  el('metricUptime').textContent = uptimeSeconds === null ? 'Unavailable' : formatUptime(uptimeSeconds);
+  el('metricUptimeSub').textContent = uptimeSeconds === null ? 'Runner did not report uptime' : formatUptimeSub(uptimeSeconds);
+
+  el('incidentBanner').classList.toggle('hidden', incidents === null || incidents === 0);
+  if (incidents !== null) {
+    el('incidentText').innerHTML = '<strong>' + incidents + ' unacknowledged incident' + (incidents !== 1 ? 's' : '') + '</strong> ' + (incidents === 1 ? 'requires' : 'require') + ' attention';
+  }
+}
+
 function timeAgo(isoStr) {
   if (!isoStr) return '';
   const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
@@ -1452,17 +1477,7 @@ async function loadDashboard() {
     el('metricRuns').textContent = health.active_runs || 0;
     el('metricRunsSub').textContent = '\u00a0';
 
-    const incidents = health.unacknowledged_incidents || 0;
-    el('metricIncidents').textContent = incidents;
-    el('metricIncidentsCard').classList.toggle('danger', incidents > 0);
-    el('metricIncidentsSub').textContent = incidents > 0 ? 'Unacknowledged' : 'None';
-
-    el('metricUptime').innerHTML = formatUptime(health.uptime_seconds || 0) + '<span class="denom"></span>';
-    el('metricUptimeSub').textContent = formatUptimeSub(health.uptime_seconds || 0);
-
-    // Incident banner
-    el('incidentBanner').classList.toggle('hidden', incidents === 0);
-    el('incidentText').innerHTML = '<strong>' + incidents + ' unacknowledged incident' + (incidents !== 1 ? 's' : '') + '</strong> require attention';
+    renderHealthMetrics(health);
 
     // Timer table
     el('timerCount').textContent = total;

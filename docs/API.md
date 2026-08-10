@@ -9,6 +9,11 @@ Base (UDS): `~/.wakelite/run/api.sock`
 ### Health
 - `GET /v1/health`
 
+The health response includes:
+
+- `uptime_seconds` — finite non-negative number of seconds since the current runner process created its service instance. It resets whenever the runner process restarts and uses a monotonic clock, so wall-clock adjustments do not change it.
+- `unacked_incidents` — exact non-negative count of currently unacknowledged incidents; it is not limited by the paginated incident-list endpoint.
+
 ### Timers
 - `GET /v1/timers`
 - `GET /v1/timers/{timer_id}`

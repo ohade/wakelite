@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from wakelite.mcp_server import ServiceUnavailable, TOOLS, call_tool
 
@@ -12,8 +13,12 @@ class MCPAndManifestTests(unittest.TestCase):
         self.assertIn("wakelite.v1.run.abort", names)
 
     def test_mcp_fail_fast_when_runner_down(self):
-        with self.assertRaises(ServiceUnavailable):
-            call_tool("wakelite.v1.health.get", {})
+        with patch(
+            "wakelite.mcp_server.request.urlopen",
+            side_effect=ConnectionRefusedError("runner unavailable"),
+        ):
+            with self.assertRaises(ServiceUnavailable):
+                call_tool("wakelite.v1.health.get", {})
 
     def test_manifest_and_registration_files(self):
         from wakelite import mcp_manifest as mm

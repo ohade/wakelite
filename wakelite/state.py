@@ -151,6 +151,8 @@ class StateStore:
                     acknowledged INTEGER NOT NULL DEFAULT 0,
                     acked_at TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_incidents_acknowledged
+                ON incidents(acknowledged);
 
                 CREATE TABLE IF NOT EXISTS active_runs (
                     run_id TEXT PRIMARY KEY,
@@ -666,6 +668,14 @@ class StateStore:
             conn = self._connect()
             rows = conn.execute(query, (limit,)).fetchall()
             return [dict(r) for r in rows]
+
+    def count_unacked_incidents(self) -> int:
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT COUNT(*) AS incident_count FROM incidents WHERE acknowledged = 0"
+            ).fetchone()
+            return int(row["incident_count"])
 
     def ack_incident(self, incident_id: int) -> bool:
         with self._lock:
