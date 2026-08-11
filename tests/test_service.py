@@ -1354,6 +1354,7 @@ def _amq_wake_check_result(
     status: str = "valid",
     live: bool = True,
     stdout: Optional[str] = None,
+    stderr: str = "",
 ):
     root = args[args.index("--root") + 1]
     recipient = args[args.index("--me") + 1]
@@ -1364,7 +1365,7 @@ def _amq_wake_check_result(
             "agent": recipient,
             "wake": {"status": status, "live": live},
         })
-    return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
 
 
 class CallbackTests(unittest.TestCase):
@@ -2166,7 +2167,12 @@ class CmuxCallbackTests(unittest.TestCase):
                                 args, status="missing", live=False
                             )
                         if case == "nonzero":
-                            return _amq_wake_check_result(args, returncode=1)
+                            return _amq_wake_check_result(
+                                args,
+                                returncode=1,
+                                stdout="",
+                                stderr="official wake check rejected the request",
+                            )
                         if case == "non-object":
                             return _amq_wake_check_result(args, stdout="[]")
                         if case == "malformed":
@@ -2188,7 +2194,9 @@ class CmuxCallbackTests(unittest.TestCase):
 
                 with patch(
                     "wakelite.service.subprocess.run", side_effect=side_effect
-                ) as mock_run, self.assertLogs("wakelite.service", level="WARNING"):
+                ) as mock_run, self.assertLogs(
+                    "wakelite.service", level="WARNING"
+                ) as logs:
                     svc._execute_callback(
                         timer,
                         "success",
@@ -2205,6 +2213,11 @@ class CmuxCallbackTests(unittest.TestCase):
                 )
                 self.assertTrue(any(args[0] == cmux and args[1] == "send" for args in calls))
                 self.assertTrue(_cmux_signal_files(td, "sess-cmux"))
+                if case == "nonzero":
+                    self.assertIn(
+                        "official wake check rejected the request",
+                        "\n".join(logs.output),
+                    )
 
     def test_amq_send_timeout_uses_send_scoped_backstop(self):
         with tempfile.TemporaryDirectory() as td:

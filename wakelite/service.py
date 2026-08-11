@@ -1334,12 +1334,25 @@ class WakeLiteService:
                 capture_output=True,
                 text=True,
             )
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
             logger.warning(
                 "AMQ wake check failed for recipient %s at %s: %s; falling back to cmux",
                 recipient,
                 root,
                 exc,
+                exc_info=True,
+            )
+            return False
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            logger.warning(
+                "AMQ wake check exited %s for recipient %s at %s: %s; "
+                "falling back to cmux",
+                result.returncode,
+                recipient,
+                root,
+                detail[-2000:] if detail else "no diagnostic output",
             )
             return False
 
@@ -1348,10 +1361,11 @@ class WakeLiteService:
         except json.JSONDecodeError as exc:
             logger.warning(
                 "Unable to parse AMQ wake-check JSON for recipient %s at %s: %s; "
-                "falling back to cmux",
+                "stdout=%r; falling back to cmux",
                 recipient,
                 root,
                 exc,
+                result.stdout[-1000:],
             )
             return False
 
@@ -1366,8 +1380,7 @@ class WakeLiteService:
 
         wake = payload.get("wake")
         accepted = (
-            result.returncode == 0
-            and payload.get("schema") == 2
+            payload.get("schema") == 2
             and payload.get("root") == root
             and payload.get("agent") == recipient
             and isinstance(wake, dict)
@@ -1377,10 +1390,13 @@ class WakeLiteService:
         if not accepted:
             logger.warning(
                 "AMQ wake is not live and valid for recipient %s at %s "
-                "(returncode=%s status=%s live=%s); falling back to cmux",
+                "(schema=%r returned_root=%r returned_agent=%r status=%r live=%r); "
+                "falling back to cmux",
                 recipient,
                 root,
-                result.returncode,
+                payload.get("schema"),
+                payload.get("root"),
+                payload.get("agent"),
                 wake.get("status") if isinstance(wake, dict) else None,
                 wake.get("live") if isinstance(wake, dict) else None,
             )
