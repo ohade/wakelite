@@ -22,6 +22,7 @@ from .config import (
     AMQ_BINARY_PATH,
     AMQ_CALLBACK_SEND_TIMEOUT_SECONDS,
     AMQ_KEEPALIVE_REGISTRY_FILE,
+    DAEMON_HEALTHY_UPTIME_SECONDS,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_RETENTION_DAYS,
     LOG_DIR,
@@ -2329,6 +2330,14 @@ end tell'''],
                 # delay and a daemon that never crashed ends up pinned at
                 # restart_max_backoff_seconds.
                 daemon_state["current_backoff_seconds"] = 0
+            elif duration_seconds >= self._healthy_uptime_threshold(timer):
+                # The daemon stayed up long enough to count as recovered, so the
+                # next crash starts backing off from the beginning again.
+                # Without this the backoff only ever grew: it was cleared solely
+                # when a timer was re-enabled, so one bad afternoon left a daemon
+                # waiting restart_max_backoff_seconds after every later crash,
+                # however healthy it had been in between.
+                daemon_state["current_backoff_seconds"] = 0
             self.state.set_daemon_state(timer_id, **daemon_state)
 
         # Check until condition — auto-delete timer if condition met
@@ -2690,6 +2699,22 @@ end tell'''],
             group="wakelite-digest",
         )
         self.state.set_meta("digest.last_day", day_key)
+
+    @staticmethod
+    def _healthy_uptime_threshold(timer: Dict[str, Any]) -> float:
+        """How long a daemon must run before its restart backoff is cleared.
+
+        Scaled by the timer's own restart_delay_seconds when that is longer than
+        the default floor, so a daemon deliberately configured to wait a long
+        time between restarts is not judged healthy by a shorter bar than its
+        own configuration implies.
+        """
+        execution = timer.get("execution") or {}
+        try:
+            restart_delay = float(execution.get("restart_delay_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            restart_delay = 0.0
+        return max(float(DAEMON_HEALTHY_UPTIME_SECONDS), restart_delay)
 
     # Deleting rows leaves free pages behind: auto_vacuum is off, so the file
     # never shrinks on its own. Reclaim only after a large prune, because

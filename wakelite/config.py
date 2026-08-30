@@ -31,6 +31,10 @@ MCP_MANIFEST_FILE = MANIFEST_DIR / "mcp.server.json"
 
 DEFAULT_RETENTION_DAYS = 30
 RUN_LOG_RETENTION_DAYS = 7
+# How long a daemon must stay up before its restart backoff is considered
+# recovered. Below this, a crash-looping daemon would clear the backoff on
+# every attempt and defeat it entirely.
+DAEMON_HEALTHY_UPTIME_SECONDS = 60
 DEFAULT_HORIZON_DAYS = 21
 
 MAX_WORKERS = 16
