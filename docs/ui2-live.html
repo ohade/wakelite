@@ -281,6 +281,7 @@
   .activity-icon.running { background: rgba(129,140,248,0.12); color: var(--accent); border: 1px solid rgba(129,140,248,0.2); }
   .activity-icon.waiting { background: rgba(34,211,238,0.12); color: var(--daemon); border: 1px solid rgba(34,211,238,0.2); }
   .activity-icon.aborted { background: rgba(251,191,36,0.12); color: var(--warning); border: 1px solid rgba(251,191,36,0.2); }
+  .activity-icon.shutdown { background: rgba(148,163,184,0.12); color: var(--text-tertiary); border: 1px solid rgba(148,163,184,0.2); }
   .activity-detail { flex: 1; }
   .activity-name { font-weight: 600; font-size: var(--fs-base); }
   .activity-msg { font-size: var(--fs-sm); color: var(--text-tertiary); }
@@ -780,7 +781,7 @@
 
 <script>
 // ===== STATE =====
-const TERMINAL_STATUSES = new Set(['success', 'failed', 'aborted', 'uncertain_crash', 'skipped']);
+const TERMINAL_STATUSES = new Set(['success', 'failed', 'aborted', 'shutdown', 'uncertain_crash', 'skipped']);
 let timerById = {};
 let runById = {};
 let activeTimerId = null;
@@ -815,6 +816,7 @@ function displayStatus(run) {
   if (run.status === 'failed') return 'Failed';
   if (run.status === 'uncertain_crash') return 'Failed (Recovered After Crash)';
   if (run.status === 'aborted') return 'Aborted';
+  if (run.status === 'shutdown') return 'Stopped for Restart';
   if (run.status === 'waiting') return 'Waiting';
   if (run.status === 'started') return 'Running...';
   return run.status || '';
@@ -823,6 +825,7 @@ function displayStatus(run) {
 function displayMessage(run) {
   if (run.status === 'success') return 'Completed Successfully';
   if (run.status === 'aborted') return 'Aborted by user';
+  if (run.status === 'shutdown') return 'Stopped by runner restart — not a failure';
   if (run.status === 'waiting') return 'Not ready yet';
   return run.message || '';
 }
@@ -833,6 +836,7 @@ function statusColor(status) {
   if (status === 'started') return 'var(--accent)';
   if (status === 'waiting') return 'var(--daemon)';
   if (status === 'aborted') return 'var(--warning)';
+  if (status === 'shutdown') return 'var(--text-tertiary)';
   return 'var(--text-tertiary)';
 }
 
@@ -842,6 +846,7 @@ function statusIconClass(status) {
   if (status === 'started') return 'running';
   if (status === 'waiting') return 'waiting';
   if (status === 'aborted') return 'aborted';
+  if (status === 'shutdown') return 'shutdown';
   return 'failed';
 }
 

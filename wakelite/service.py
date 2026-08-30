@@ -76,6 +76,9 @@ class WakeLiteService:
         self._run_lock = threading.RLock()
         self._active_processes: Dict[str, subprocess.Popen[Any]] = {}
         self._abort_requests: set[str] = set()
+        # Runs whose process we SIGTERM'd from stop(). Their non-zero exit is a
+        # planned shutdown, not a failure — see _run_occurrence's status mapping.
+        self._shutdown_terminated: set[str] = set()
 
     _MAX_SLEEP = 15.0  # seconds; caps idle sleep for heartbeat liveness
 
@@ -140,9 +143,11 @@ class WakeLiteService:
         self._wake_event.set()  # break long sleep for fast shutdown
         if self._scheduler_thread:
             self._scheduler_thread.join(timeout=5)
-        # Terminate all active processes (daemon and regular)
+        # Terminate all active processes (daemon and regular). Mark each run first
+        # so the run thread reports "shutdown" rather than a spurious failure.
         with self._run_lock:
             for run_id, proc in list(self._active_processes.items()):
+                self._shutdown_terminated.add(run_id)
                 self._terminate_process(proc)
         self._executor.shutdown(wait=True, cancel_futures=True)
 
@@ -938,7 +943,8 @@ class WakeLiteService:
           on_failure: "delete" | "continue"
 
         Aborted runs do NOT trigger either condition — they are user-initiated
-        cancellations, not a meaningful success/failure signal.
+        cancellations, not a meaningful success/failure signal. Neither do
+        "shutdown" runs, which we terminated ourselves during a runner restart.
         """
         until = timer.get("until")
         if not until:
@@ -959,7 +965,7 @@ class WakeLiteService:
         duration_seconds: float,
         slack_thread_ts: Optional[str] = None,
     ) -> None:
-        """Fire callback if configured. Only on success/failed, never waiting/aborted."""
+        """Fire callback if configured. Only on success/failed, never waiting/aborted/shutdown."""
         callback = timer.get("callback")
         if not callback:
             return
@@ -2259,10 +2265,18 @@ end tell'''],
 
                     with self._run_lock:
                         abort_requested = run_id in self._abort_requests
+                        shutdown_terminated = run_id in self._shutdown_terminated
 
                     if abort_requested:
                         status = "aborted"
                         message = "aborted by user"
+                        if exit_code is None:
+                            exit_code = -15
+                    elif shutdown_terminated:
+                        # We SIGTERM'd this process ourselves during stop(). The
+                        # non-zero exit is the planned teardown, not a failure.
+                        status = "shutdown"
+                        message = "stopped by runner shutdown"
                         if exit_code is None:
                             exit_code = -15
                     elif exit_code == 0:
@@ -2282,6 +2296,7 @@ end tell'''],
             with self._run_lock:
                 self._active_processes.pop(run_id, None)
                 self._abort_requests.discard(run_id)
+                self._shutdown_terminated.discard(run_id)
 
         self.state.finish_run(
             run_id=run_id,
@@ -2302,13 +2317,19 @@ end tell'''],
 
         # Update daemon state if this is a daemon timer
         if timer.get("timer_type") == "daemon":
-            self.state.set_daemon_state(
-                timer_id,
-                status="stopped",
-                last_exited_at=self.state._now(),
-                last_exit_code=exit_code,
-                current_run_id=None,
-            )
+            daemon_state: Dict[str, Any] = {
+                "status": "stopped",
+                "last_exited_at": self.state._now(),
+                "last_exit_code": exit_code,
+                "current_run_id": None,
+            }
+            if status == "shutdown":
+                # A planned teardown is not a failure, so it must not inflate the
+                # restart backoff. Without this, each runner restart doubles the
+                # delay and a daemon that never crashed ends up pinned at
+                # restart_max_backoff_seconds.
+                daemon_state["current_backoff_seconds"] = 0
+            self.state.set_daemon_state(timer_id, **daemon_state)
 
         # Check until condition — auto-delete timer if condition met
         if self._check_until_condition(timer, status):
@@ -2340,7 +2361,13 @@ end tell'''],
                 return
             # Delete failed — fall through to normal post-run processing
 
-        if status not in ("success", "aborted", "waiting"):
+        if status == "shutdown":
+            # Planned teardown from stop(): no incident and no notification. The
+            # run row already records it, and a runner restart is not an event
+            # worth alerting on — treating it as one was the single largest
+            # source of self-inflicted run_failed noise.
+            pass
+        elif status not in ("success", "aborted", "waiting"):
             self.state.add_incident(
                 "error",
                 "run_failed",
@@ -2368,6 +2395,8 @@ end tell'''],
         if slack_thread_ts:
             if status == "aborted":
                 emoji, label = ":stop_sign:", "Aborted"
+            elif status == "shutdown":
+                emoji, label = ":arrows_counterclockwise:", "Stopped for restart"
             elif status == "waiting":
                 emoji, label = ":large_blue_circle:", "Waiting"
             elif status == "success":

@@ -135,6 +135,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         tr.run-failed { background: rgba(239,68,68,0.1); }
                         tr.run-running { background: rgba(251,191,36,0.1); }
                         tr.run-aborted { background: rgba(251,191,36,0.08); }
+                        tr.run-shutdown { background: rgba(148,163,184,0.12); }
                         tr.run-waiting { background: rgba(96,165,250,0.1); }
                         .logs-link { font-size: 12px; padding: 4px 8px; }
                         .run-live {
@@ -549,7 +550,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                       <script>
                         if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(function(){}); }
-                        const TERMINAL_STATUSES = new Set(['success', 'failed', 'aborted', 'uncertain_crash', 'skipped']);
+                        const TERMINAL_STATUSES = new Set(['success', 'failed', 'aborted', 'shutdown', 'uncertain_crash', 'skipped']);
                         let timerById = {};
                         let runById = {};
                         let activeTimerId = null;
@@ -569,6 +570,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                           if (run.status === 'failed') return 'Failed';
                           if (run.status === 'uncertain_crash') return 'Failed (Recovered After Crash)';
                           if (run.status === 'aborted') return 'Aborted';
+                          if (run.status === 'shutdown') return 'Stopped for Restart';
                           if (run.status === 'waiting') return 'Waiting';
                           if (run.status === 'started') return 'Running...';
                           return run.status || '';
@@ -577,6 +579,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         function displayMessage(run) {
                           if (run.status === 'success') return 'Completed Successfully';
                           if (run.status === 'aborted') return 'Aborted by user';
+                          if (run.status === 'shutdown') return 'Stopped by runner restart \u2014 not a failure';
                           if (run.status === 'waiting') return 'Not ready yet \u2014 will retry';
                           return run.message || '';
                         }
@@ -1259,6 +1262,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             if (run.status === 'failed' || run.status === 'uncertain_crash') tr.className = 'run-failed';
                             if (run.status === 'started') tr.className = 'run-running';
                             if (run.status === 'aborted') tr.className = 'run-aborted';
+                            if (run.status === 'shutdown') tr.className = 'run-shutdown';
                             if (run.status === 'waiting') tr.className = 'run-waiting';
                             const timerLabel = run.timer_name || timerById[run.timer_id]?.name || 'Deleted timer';
                             tr.innerHTML = `<td>${timerLabel}</td><td>${displayStatus(run)}</td><td>${run.scheduled_at || ''}</td><td>${displayMessage(run)}</td><td><button class="logs-link secondary" data-run-id="${run.run_id}">View Logs</button></td>`;

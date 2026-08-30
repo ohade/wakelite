@@ -543,6 +543,79 @@ class DaemonTimerTests(unittest.TestCase):
             # restart_on_failure=False + exit 1 = no restart
             self.assertEqual(len(lines), 1, f"Expected exactly 1 start (no restart), got {len(lines)}")
 
+    def test_shutdown_terminated_daemon_is_not_reported_as_failure(self):
+        """A daemon we SIGTERM during stop() is a planned teardown, not a crash.
+
+        Every runner restart tears down its supervised daemons. Before this
+        contract those SIGTERMs landed as status="failed" plus a run_failed
+        incident plus a desktop alert, so a routine restart was
+        indistinguishable from a real crash in run_history.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "daemon-shutdown",
+                "comment": "Long-lived daemon; killed by stop(), not by its own fault",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "execution": {
+                    "restart_on_failure": True,
+                    "restart_delay_seconds": 1,
+                    "restart_max_backoff_seconds": 300,
+                },
+                "command": {"mode": "shell", "shell": "sleep 60"},
+            })
+            timer_id = timer["id"]
+
+            svc.start()
+            try:
+                run = None
+                for _ in range(60):
+                    runs = svc.list_runs(limit=5, timer_id=timer_id)
+                    if runs and runs[0]["status"] == "started":
+                        run = runs[0]
+                        break
+                    time.sleep(0.1)
+                self.assertIsNotNone(run, "daemon never reached status=started")
+            finally:
+                svc.stop()
+
+            terminal = None
+            for _ in range(50):
+                runs = svc.list_runs(limit=5, timer_id=timer_id)
+                if runs and runs[0]["status"] in (
+                    "success", "failed", "aborted", "shutdown", "uncertain_crash", "skipped", "waiting"
+                ):
+                    terminal = runs[0]
+                    break
+                time.sleep(0.1)
+
+            self.assertIsNotNone(terminal, "shutdown-terminated run never reached a terminal status")
+            self.assertEqual(terminal["status"], "shutdown")
+            self.assertIn("shutdown", (terminal.get("message") or "").lower())
+
+            # No run_failed incident for a planned teardown.
+            run_failed = svc.state.list_incidents(limit=50, incident_type="run_failed")
+            self.assertEqual(
+                run_failed, [], f"planned shutdown filed run_failed incidents: {run_failed}"
+            )
+
+            # And no desktop failure alert. _bootstrap mocks notifier.notify, so
+            # this asserts the no-notification half of the contract without
+            # actually posting anything.
+            self.assertEqual(
+                svc.notifier.notify.call_args_list,
+                [],
+                "planned shutdown fired a desktop notification",
+            )
+
+            # The backoff must not be inflated by a planned stop, otherwise
+            # repeated runner restarts pin a healthy daemon at max backoff.
+            ds = svc.state.get_daemon_state(timer_id)
+            self.assertEqual(ds.current_backoff_seconds, 0)
+
 
 class ParallelExecutionTests(unittest.TestCase):
     def test_two_interval_timers_run_concurrently(self):
