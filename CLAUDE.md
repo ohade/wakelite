@@ -49,7 +49,8 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `utils.py` | `atomic_write_json`, ISO parsing |
 | `recurrence.py` | Pure functions: parse recurrence specs, compute next occurrences. No I/O |
 | `timer_store.py` | Timer CRUD on `~/.wakelite/timers.json`. Validates schema, thread-safe |
-| `state.py` | SQLite (`~/.wakelite/state.db`) — run history, runtime state, daemon state, incidents |
+| `state.py` | SQLite (`~/.wakelite/state.db`) — run history, runtime state, daemon state, incidents, incident ignore rules |
+| `notifier.py` | Desktop + Slack notifications. Desktop alerts are posted by `notifier-app/` (WakeLiteNotify.app) so a click opens the dashboard; falls back to terminal-notifier, then osascript |
 | `notifier.py` | macOS notifications (`osascript`) + Slack DMs (`notify_slack()`) |
 | `capacity.py` | Time-axis per-resource admission gate. Projects each timer's resource use onto N-minute buckets over a 7-day horizon, blocks create/update when any resource's peak > capacity. Pure functions, no I/O. `_executor.slot` is a well-known resource (capacity=MAX_WORKERS); user-declared `resources[]` participate when `capacity`/`estimated_usage` parse |
 | `service.py` | **Core orchestrator.** Scheduler loop, run execution (ThreadPoolExecutor), timer lifecycle |

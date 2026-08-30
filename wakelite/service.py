@@ -560,12 +560,99 @@ class WakeLiteService:
             "logs_expired": logs_expired,
         }
 
-    def ack_incident(self, incident_id: int, idempotency_key: str) -> Dict[str, Any]:
+    def ack_incident(
+        self, incident_id: int, idempotency_key: str, source: Optional[str] = None
+    ) -> Dict[str, Any]:
         return self._idempotent(
             scope=f"incident.ack:{incident_id}",
             idem_key=idempotency_key,
             payload={"incident_id": incident_id},
-            fn=lambda: {"acknowledged": self.state.ack_incident(incident_id)},
+            fn=lambda: {"acknowledged": self.state.ack_incident(incident_id, source=source)},
+        )
+
+    def unack_incident(self, incident_id: int, idempotency_key: str) -> Dict[str, Any]:
+        return self._idempotent(
+            scope=f"incident.unack:{incident_id}",
+            idem_key=idempotency_key,
+            payload={"incident_id": incident_id},
+            fn=lambda: {"reopened": self.state.unack_incident(incident_id)},
+        )
+
+    def ack_incidents_bulk(
+        self,
+        idempotency_key: str,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        timer_id: Optional[str] = None,
+        since: Optional[str] = None,
+        max_id: Optional[int] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        selector = {
+            "type": incident_type,
+            "severity": severity,
+            "timer_id": timer_id,
+            "since": since,
+            "max_id": max_id,
+        }
+        return self._idempotent(
+            scope="incident.ack_bulk",
+            idem_key=idempotency_key,
+            payload=selector,
+            fn=lambda: {
+                "acknowledged_count": self.state.ack_incidents(
+                    incident_type=incident_type,
+                    severity=severity,
+                    timer_id=timer_id,
+                    since=since,
+                    max_id=max_id,
+                    source=source,
+                ),
+                "selector": selector,
+            },
+        )
+
+    def incident_summary(self, days: int = 30) -> Dict[str, Any]:
+        summary = self.state.incident_summary(days)
+        # Resolve timer names so the report reads as behaviour, not UUIDs.
+        # Timers deleted since the incident was raised keep their id and are
+        # labelled as deleted rather than silently dropped.
+        names = {t["id"]: t.get("name") for t in self.timer_store.list_timers()}
+        for row in summary.get("by_timer", []):
+            timer_id = row.get("key")
+            if not timer_id:
+                row["timer_name"] = "(no timer)"
+                row["timer_exists"] = False
+                continue
+            row["timer_name"] = names.get(timer_id) or f"(deleted {timer_id[:8]})"
+            row["timer_exists"] = timer_id in names
+        return summary
+
+    def add_incident_mute(
+        self,
+        idempotency_key: str,
+        timer_id: Optional[str] = None,
+        incident_type: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {"timer_id": timer_id, "type": incident_type, "reason": reason}
+        return self._idempotent(
+            scope="incident.mute.add",
+            idem_key=idempotency_key,
+            payload=payload,
+            fn=lambda: {
+                "mute": self.state.add_incident_mute(
+                    timer_id=timer_id, incident_type=incident_type, reason=reason
+                )
+            },
+        )
+
+    def delete_incident_mute(self, mute_id: int, idempotency_key: str) -> Dict[str, Any]:
+        return self._idempotent(
+            scope=f"incident.mute.delete:{mute_id}",
+            idem_key=idempotency_key,
+            payload={"mute_id": mute_id},
+            fn=lambda: {"deleted": self.state.delete_incident_mute(mute_id)},
         )
 
     def _compute_next_wake(self, now: datetime) -> float:
@@ -2240,6 +2327,7 @@ end tell'''],
                 self.notifier.notify(
                     "WakeLite: timer completed",
                     f"{timer_name} — {trigger}=delete triggered. Timer auto-deleted.",
+                    open_url=self.notifier.ui_url(),
                 )
                 if slack_activity_enabled:
                     self.notifier.notify_slack(
@@ -2260,11 +2348,18 @@ end tell'''],
                 timer_id,
             )
             if notify_on_failure:
-                self.notifier.notify("WakeLite failure", f"{timer.get('name', timer_id)} failed: {message}")
+                self.notifier.notify(
+                    "WakeLite failure",
+                    f"{timer.get('name', timer_id)} failed: {message}",
+                    open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
+                    group=f"wakelite-timer-{timer_id}",
+                )
         elif notify_on_success:
             self.notifier.notify(
                 "WakeLite success",
                 f"{timer.get('name', timer_id)} completed at {scheduled_at}",
+                open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
+                group=f"wakelite-timer-{timer_id}",
             )
 
         # Always close the Slack thread with a status reply (if we opened one).
@@ -2562,16 +2657,30 @@ end tell'''],
         self.notifier.notify(
             "WakeLite overnight summary",
             f"success={ok}, failed={failed}, skipped={skipped}",
+            open_url=self.notifier.ui_url("#incidents"),
+            group="wakelite-digest",
         )
         self.state.set_meta("digest.last_day", day_key)
+
+    # Deleting rows leaves free pages behind: auto_vacuum is off, so the file
+    # never shrinks on its own. Reclaim only after a large prune, because
+    # VACUUM rewrites the whole database and briefly holds a write lock.
+    _VACUUM_ROW_THRESHOLD = 5000
 
     def _prune(self) -> None:
         summary = self.state.prune_old_data(DEFAULT_RETENTION_DAYS)
         log_summary = self._prune_run_log_files(RUN_LOG_RETENTION_DAYS)
         registry_pruned = self._prune_terminal_registry(max_age_hours=24)
         signals_pruned = self._prune_signal_files(max_age_hours=24)
-        logger.info("Pruned old data: db=%s run_logs=%s registry=%d signals=%d",
-                     summary, log_summary, registry_pruned, signals_pruned)
+        vacuumed = False
+        if sum(summary.values()) >= self._VACUUM_ROW_THRESHOLD:
+            try:
+                self.state.vacuum()
+                vacuumed = True
+            except Exception as exc:  # never let maintenance stop the scheduler
+                logger.warning("VACUUM after prune failed: %s", exc)
+        logger.info("Pruned old data: db=%s run_logs=%s registry=%d signals=%d vacuumed=%s",
+                     summary, log_summary, registry_pruned, signals_pruned, vacuumed)
 
     def _repair_stale_runtime_locks(self) -> set[str]:
         repaired: set[str] = set()

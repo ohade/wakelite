@@ -65,7 +65,11 @@ Namespace: `wakelite.v1.*` — see [`docs/API.md`](docs/API.md) for the full too
 - **Exit code 75**: BSD `EX_TEMPFAIL` — polling scripts return "waiting" (blue rows) instead of "failed" (red rows)
 - **Notifications**: macOS desktop + Slack DMs, global mute toggle
 - **Resources**: capacity tracking per timer to prevent overcommit
-- **Incidents**: auto-detection of repeated failures, acknowledgement via API
+- **Clickable notifications**: desktop alerts open the timer or report they are about,
+  posted by the small `notifier-app/` bundle (build with `notifier-app/build-app.sh`)
+- **Incidents**: auto-detection of repeated failures, with a dashboard report at
+  `/ui#incidents` — breakdown by type and timer, daily trend, per-incident resolve,
+  filtered bulk resolve, and ignore rules for known-noisy sources
 - **Web dashboard**: real-time status, inline editing, run-now, abort, log viewing — installable as a PWA (Chrome → "Install page as app")
 - **MCP integration**: full Claude/Codex tool namespace for AI-driven scheduling
 - **Idempotency**: every create/update/delete requires a caller-chosen key — if the same key is sent twice within 24 hours, the second call returns the original result instead of duplicating the action

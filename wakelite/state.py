@@ -154,6 +154,29 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_incidents_acknowledged
                 ON incidents(acknowledged);
 
+                CREATE INDEX IF NOT EXISTS idx_incidents_ack_created
+                ON incidents(acknowledged, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_incidents_timer
+                ON incidents(timer_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_incidents_type
+                ON incidents(type, created_at DESC);
+
+                -- Ignore rules. A matching rule makes new incidents arrive
+                -- already-acknowledged, so they stay in the report as evidence
+                -- but never inflate the unacknowledged counter. '*' means "any";
+                -- a sentinel rather than NULL because SQLite treats NULLs as
+                -- distinct and would allow duplicate rules.
+                CREATE TABLE IF NOT EXISTS incident_mutes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    timer_id TEXT NOT NULL DEFAULT '*',
+                    type TEXT NOT NULL DEFAULT '*',
+                    reason TEXT,
+                    UNIQUE(timer_id, type)
+                );
+
                 CREATE TABLE IF NOT EXISTS active_runs (
                     run_id TEXT PRIMARY KEY,
                     timer_id TEXT NOT NULL,
@@ -184,6 +207,9 @@ class StateStore:
             rt_cols = [row["name"] for row in conn.execute("PRAGMA table_info(timer_runtime)").fetchall()]
             if "running_count" not in rt_cols:
                 conn.execute("ALTER TABLE timer_runtime ADD COLUMN running_count INTEGER NOT NULL DEFAULT 0")
+            inc_cols = [row["name"] for row in conn.execute("PRAGMA table_info(incidents)").fetchall()]
+            if "ack_source" not in inc_cols:
+                conn.execute("ALTER TABLE incidents ADD COLUMN ack_source TEXT")
 
     @staticmethod
     def _now() -> str:
@@ -648,26 +674,131 @@ class StateStore:
                 "response": payload,
             }
 
-    def add_incident(self, severity: str, incident_type: str, message: str, timer_id: Optional[str] = None) -> int:
+    # ----- incidents -------------------------------------------------
+
+    MUTE_ANY = "*"
+
+    @staticmethod
+    def _incident_where(
+        include_acked: bool = True,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        timer_id: Optional[str] = None,
+        since: Optional[str] = None,
+        max_id: Optional[int] = None,
+    ) -> tuple:
+        """Build the shared WHERE clause for incident list/count/ack.
+
+        One builder keeps the list the operator sees and the rows a bulk ack
+        touches provably identical, so "resolve all" can never act on a wider
+        set than what was displayed.
+        """
+        clauses: List[str] = []
+        params: List[Any] = []
+        if not include_acked:
+            clauses.append("acknowledged = 0")
+        if incident_type:
+            clauses.append("type = ?")
+            params.append(incident_type)
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity)
+        if timer_id:
+            clauses.append("timer_id = ?")
+            params.append(timer_id)
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if max_id is not None:
+            clauses.append("id <= ?")
+            params.append(int(max_id))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def matching_mute(self, incident_type: str, timer_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Return the ignore rule covering this incident, if any."""
+        any_ = self.MUTE_ANY
         with self._lock:
             conn = self._connect()
-            cursor = conn.execute(
-                "INSERT INTO incidents(created_at, severity, type, timer_id, message) VALUES(?, ?, ?, ?, ?)",
-                (self._now(), severity, incident_type, timer_id, message),
-            )
+            row = conn.execute(
+                """
+                SELECT * FROM incident_mutes
+                WHERE (timer_id = ? OR timer_id = ?)
+                  AND (type = ? OR type = ?)
+                ORDER BY (timer_id = ?) DESC, (type = ?) DESC
+                LIMIT 1
+                """,
+                (timer_id or "", any_, incident_type, any_, any_, any_),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def add_incident(self, severity: str, incident_type: str, message: str, timer_id: Optional[str] = None) -> int:
+        muted = self.matching_mute(incident_type, timer_id)
+        with self._lock:
+            conn = self._connect()
+            now = self._now()
+            if muted:
+                # Still recorded, so the report keeps full history; pre-acked so
+                # it never re-inflates the unacknowledged counter.
+                cursor = conn.execute(
+                    "INSERT INTO incidents(created_at, severity, type, timer_id, message,"
+                    " acknowledged, acked_at, ack_source) VALUES(?, ?, ?, ?, ?, 1, ?, ?)",
+                    (now, severity, incident_type, timer_id, message, now, f"mute:{muted['id']}"),
+                )
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO incidents(created_at, severity, type, timer_id, message) VALUES(?, ?, ?, ?, ?)",
+                    (now, severity, incident_type, timer_id, message),
+                )
             return int(cursor.lastrowid)
 
-    def list_incidents(self, limit: int = 200, include_acked: bool = True) -> List[Dict[str, Any]]:
+    def list_incidents(
+        self,
+        limit: int = 200,
+        include_acked: bool = True,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        timer_id: Optional[str] = None,
+        since: Optional[str] = None,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         limit = min(max(limit, 1), 1000)
-        query = "SELECT * FROM incidents"
-        if not include_acked:
-            query += " WHERE acknowledged = 0"
-        query += " ORDER BY id DESC LIMIT ?"
+        offset = max(int(offset), 0)
+        where, params = self._incident_where(
+            include_acked=include_acked,
+            incident_type=incident_type,
+            severity=severity,
+            timer_id=timer_id,
+            since=since,
+        )
+        query = "SELECT * FROM incidents" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
 
         with self._lock:
             conn = self._connect()
-            rows = conn.execute(query, (limit,)).fetchall()
+            rows = conn.execute(query, (*params, limit, offset)).fetchall()
             return [dict(r) for r in rows]
+
+    def count_incidents(
+        self,
+        include_acked: bool = True,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        timer_id: Optional[str] = None,
+        since: Optional[str] = None,
+    ) -> int:
+        where, params = self._incident_where(
+            include_acked=include_acked,
+            incident_type=incident_type,
+            severity=severity,
+            timer_id=timer_id,
+            since=since,
+        )
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM incidents" + where, tuple(params)
+            ).fetchone()
+            return int(row["n"])
 
     def count_unacked_incidents(self) -> int:
         with self._lock:
@@ -677,14 +808,155 @@ class StateStore:
             ).fetchone()
             return int(row["incident_count"])
 
-    def ack_incident(self, incident_id: int) -> bool:
+    def ack_incident(self, incident_id: int, source: Optional[str] = None) -> bool:
         with self._lock:
             conn = self._connect()
             cursor = conn.execute(
-                "UPDATE incidents SET acknowledged = 1, acked_at = ? WHERE id = ?",
-                (self._now(), incident_id),
+                "UPDATE incidents SET acknowledged = 1, acked_at = ?, ack_source = ?"
+                " WHERE id = ? AND acknowledged = 0",
+                (self._now(), source or "api", incident_id),
             )
             return cursor.rowcount > 0
+
+    def ack_incidents(
+        self,
+        incident_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        timer_id: Optional[str] = None,
+        since: Optional[str] = None,
+        max_id: Optional[int] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Acknowledge every unacknowledged incident matching the filter.
+
+        `max_id` pins the operation to incidents that already existed when the
+        operator looked, so a run failing mid-request is not silently resolved.
+        """
+        where, params = self._incident_where(
+            include_acked=False,
+            incident_type=incident_type,
+            severity=severity,
+            timer_id=timer_id,
+            since=since,
+            max_id=max_id,
+        )
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.execute(
+                "UPDATE incidents SET acknowledged = 1, acked_at = ?, ack_source = ?" + where,
+                (self._now(), source or "bulk", *params),
+            )
+            return int(cursor.rowcount)
+
+    def unack_incident(self, incident_id: int) -> bool:
+        """Reopen a resolved incident (undo for a mis-click)."""
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.execute(
+                "UPDATE incidents SET acknowledged = 0, acked_at = NULL, ack_source = NULL"
+                " WHERE id = ? AND acknowledged = 1",
+                (incident_id,),
+            )
+            return cursor.rowcount > 0
+
+    def incident_summary(self, days: int = 30) -> Dict[str, Any]:
+        """Aggregate report: totals, breakdowns, and a daily trend."""
+        days = min(max(int(days), 1), 365)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with self._lock:
+            conn = self._connect()
+
+            totals = dict(
+                conn.execute(
+                    "SELECT COUNT(*) AS total,"
+                    " COALESCE(SUM(acknowledged = 0), 0) AS unacked,"
+                    " MIN(created_at) AS oldest, MAX(created_at) AS newest"
+                    " FROM incidents"
+                ).fetchone()
+            )
+
+            def group(column: str) -> List[Dict[str, Any]]:
+                rows = conn.execute(
+                    f"SELECT {column} AS key, COUNT(*) AS total,"
+                    " COALESCE(SUM(acknowledged = 0), 0) AS unacked,"
+                    " MAX(created_at) AS last_seen, MIN(created_at) AS first_seen"
+                    f" FROM incidents GROUP BY {column} ORDER BY unacked DESC, total DESC LIMIT 50"
+                ).fetchall()
+                return [dict(r) for r in rows]
+
+            trend = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS total,"
+                    " COALESCE(SUM(acknowledged = 0), 0) AS unacked"
+                    " FROM incidents WHERE created_at >= ?"
+                    " GROUP BY day ORDER BY day",
+                    (cutoff,),
+                ).fetchall()
+            ]
+
+            recent = dict(
+                conn.execute(
+                    "SELECT COUNT(*) AS total, COALESCE(SUM(acknowledged = 0), 0) AS unacked"
+                    " FROM incidents WHERE created_at >= ?",
+                    (cutoff,),
+                ).fetchone()
+            )
+
+            return {
+                "window_days": days,
+                "totals": totals,
+                "recent": recent,
+                "by_type": group("type"),
+                "by_severity": group("severity"),
+                "by_timer": group("timer_id"),
+                "trend": trend,
+            }
+
+    # ----- ignore rules ----------------------------------------------
+
+    def add_incident_mute(
+        self,
+        timer_id: Optional[str] = None,
+        incident_type: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        any_ = self.MUTE_ANY
+        tid = timer_id or any_
+        typ = incident_type or any_
+        if tid == any_ and typ == any_:
+            raise ValueError("an ignore rule must pin at least a timer or a type")
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "INSERT OR IGNORE INTO incident_mutes(created_at, timer_id, type, reason)"
+                " VALUES(?, ?, ?, ?)",
+                (self._now(), tid, typ, reason),
+            )
+            row = conn.execute(
+                "SELECT * FROM incident_mutes WHERE timer_id = ? AND type = ?", (tid, typ)
+            ).fetchone()
+            return dict(row)
+
+    def list_incident_mutes(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT * FROM incident_mutes ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_incident_mute(self, mute_id: int) -> bool:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.execute("DELETE FROM incident_mutes WHERE id = ?", (int(mute_id),))
+            return cursor.rowcount > 0
+
+    def vacuum(self) -> None:
+        """Reclaim file space after a large delete (auto_vacuum is off)."""
+        with self._lock:
+            conn = self._connect()
+            conn.execute("VACUUM")
 
     def prune_old_data(self, retention_days: int = DEFAULT_RETENTION_DAYS) -> Dict[str, int]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)

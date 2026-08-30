@@ -3,15 +3,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from .config import API_HOST, API_PORT
 
 logger = logging.getLogger(__name__)
 
 SLACK_CHANNEL = "<set-WAKELITE_SLACK_CHANNEL>"
+
+# Distinguishes "not looked up yet" from "looked up, not installed" (None).
+_UNRESOLVED = object()
 
 # Keychain item holding the Slack bot token (ai-audit A7, 2026-06-15).
 # Moved out of plaintext ~/.claude.json. Read with:
@@ -43,15 +49,102 @@ def _resolve_slack_token() -> Optional[str]:
 
 
 class Notifier:
+    _poster_cache: Any = _UNRESOLVED
+
     def __init__(self) -> None:
         self.muted = False
         self._daily_thread_ts_by_day: dict[str, str] = {}
 
-    def notify(self, title: str, message: str) -> None:
+    @staticmethod
+    def ui_url(fragment: str = "") -> str:
+        """A deep link into the local dashboard, for notification clicks."""
+        return f"http://{API_HOST}:{API_PORT}/ui{fragment}"
+
+    @classmethod
+    def _posters(cls) -> list:
+        """Notification posters that can carry a click target, best first.
+
+        WakeLiteNotify.app is built from notifier-app/ and posts under
+        WakeLite's own bundle identity, so the click opens the dashboard.
+        terminal-notifier is kept as a second choice because it works on
+        macOS versions that will grant it permission; on macOS 26 it is
+        refused and is skipped after its first failure.
+        """
+        if cls._poster_cache is _UNRESOLVED:
+            found = []
+            app = Path.home() / "Applications/WakeLiteNotify.app/Contents/MacOS/WakeLiteNotify"
+            if app.exists():
+                found.append(("wakelite-notify", str(app)))
+            binary = shutil.which("terminal-notifier")
+            if binary:
+                found.append(("terminal-notifier", binary))
+            cls._poster_cache = found
+        return cls._poster_cache
+
+    @staticmethod
+    def _poster_command(kind: str, path: str, title: str, message: str,
+                        open_url: Optional[str], group: Optional[str]) -> list:
+        if kind == "wakelite-notify":
+            cmd = [path, "--title", title, "--message", message]
+            if open_url:
+                cmd += ["--url", open_url]
+            if group:
+                cmd += ["--group", group]
+            return cmd
+        cmd = [path, "-title", title, "-message", message]
+        if open_url:
+            cmd += ["-open", open_url]
+        if group:
+            cmd += ["-group", group]
+        return cmd
+
+    def notify(
+        self,
+        title: str,
+        message: str,
+        open_url: Optional[str] = None,
+        group: Optional[str] = None,
+    ) -> None:
+        """Post a desktop notification, clickable where possible.
+
+        AppleScript's `display notification` carries no click action: macOS
+        attributes an osascript notification to Script Editor, so clicking one
+        opens Script Editor's document picker instead of anything to do with
+        WakeLite. The posters above can carry `open_url`, so the click lands on
+        the timer or report the alert is about. `group` collapses repeat alerts
+        for the same timer into one, so a five-minute health check that fails
+        all afternoon does not bury everything else.
+
+        Falls back to osascript when no poster is available or all of them
+        fail, so the alert still arrives — just without the click target.
+        """
         if self.muted:
             return
-        safe_message = message.replace("\"", "'")
-        safe_title = title.replace("\"", "'")
+
+        for kind, path in list(self._posters()):
+            cmd = self._poster_command(kind, path, title, message, open_url, group)
+            try:
+                result = subprocess.run(cmd, check=False, capture_output=True, timeout=10)
+                if result.returncode == 0:
+                    return
+                detail = (result.stderr or b"").decode("utf-8", "replace").strip()[:200]
+            except Exception:
+                detail = "raised"
+                logger.debug("%s raised", kind, exc_info=True)
+            # Permission denial is permanent for the life of this process, so
+            # do not pay a doomed subprocess per notification. A runner restart
+            # re-probes, which is how a later permission grant takes effect.
+            type(self)._poster_cache = [
+                entry for entry in self._posters() if entry[0] != kind
+            ]
+            logger.info(
+                "notification poster %s failed (%s); skipping it for the rest of this process",
+                kind,
+                detail,
+            )
+
+        safe_message = message.replace('"', "'")
+        safe_title = title.replace('"', "'")
         script = f'display notification "{safe_message}" with title "{safe_title}"'
         try:
             subprocess.run(["osascript", "-e", script], check=False, capture_output=True)

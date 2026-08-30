@@ -1483,18 +1483,106 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, self.service.abort_run(run_id, idem_key))
                 return
 
+            if method == "GET" and path == "/v1/incidents/summary":
+                days = int((q.get("days") or ["30"])[0])
+                self._send_json(200, self.service.incident_summary(days))
+                return
+
+            if method == "GET" and path == "/v1/incidents/mutes":
+                self._send_json(200, {"mutes": self.service.state.list_incident_mutes()})
+                return
+
             if method == "GET" and path == "/v1/incidents":
                 limit = int((q.get("limit") or ["200"])[0])
                 include_acked = (q.get("include_acked") or ["true"])[0].lower() != "false"
-                incidents = self.service.state.list_incidents(limit=limit, include_acked=include_acked)
-                self._send_json(200, {"incidents": incidents})
+                offset = int((q.get("offset") or ["0"])[0])
+                incident_type = (q.get("type") or [None])[0]
+                severity = (q.get("severity") or [None])[0]
+                timer_id = (q.get("timer_id") or [None])[0]
+                since = (q.get("since") or [None])[0]
+                filters = {
+                    "include_acked": include_acked,
+                    "incident_type": incident_type,
+                    "severity": severity,
+                    "timer_id": timer_id,
+                    "since": since,
+                }
+                incidents = self.service.state.list_incidents(
+                    limit=limit, offset=offset, **filters
+                )
+                names = {t["id"]: t.get("name") for t in self.service.timer_store.list_timers()}
+                for row in incidents:
+                    tid = row.get("timer_id")
+                    row["timer_name"] = names.get(tid) if tid else None
+                    row["timer_exists"] = bool(tid) and tid in names
+                self._send_json(
+                    200,
+                    {
+                        "incidents": incidents,
+                        "total_matching": self.service.state.count_incidents(**filters),
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
+                return
+
+            # Must precede the per-incident /ack route: "/v1/incidents/ack"
+            # also matches that prefix/suffix pattern and would parse the
+            # literal "incidents" as an id.
+            if method == "POST" and path == "/v1/incidents/ack":
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                max_id = body.get("max_id")
+                self._send_json(
+                    200,
+                    self.service.ack_incidents_bulk(
+                        idempotency_key=idem_key,
+                        incident_type=body.get("type"),
+                        severity=body.get("severity"),
+                        timer_id=body.get("timer_id"),
+                        since=body.get("since"),
+                        max_id=int(max_id) if max_id is not None else None,
+                        source=body.get("source") or "ui",
+                    ),
+                )
+                return
+
+            if method == "POST" and path == "/v1/incidents/mutes":
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                try:
+                    result = self.service.add_incident_mute(
+                        idempotency_key=idem_key,
+                        timer_id=body.get("timer_id"),
+                        incident_type=body.get("type"),
+                        reason=body.get("reason"),
+                    )
+                except ValueError as exc:
+                    raise ApiError(400, str(exc))
+                self._send_json(200, result)
+                return
+
+            if method == "DELETE" and path.startswith("/v1/incidents/mutes/"):
+                mute_id = int(path.rsplit("/", 1)[-1])
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                self._send_json(200, self.service.delete_incident_mute(mute_id, idem_key))
+                return
+
+            if method == "POST" and path.startswith("/v1/incidents/") and path.endswith("/unack"):
+                incident_id = int(path.split("/")[-2])
+                body = self._read_json()
+                idem_key = self._require_idempotency(body)
+                self._send_json(200, self.service.unack_incident(incident_id, idem_key))
                 return
 
             if method == "POST" and path.startswith("/v1/incidents/") and path.endswith("/ack"):
                 incident_id = int(path.split("/")[-2])
                 body = self._read_json()
                 idem_key = self._require_idempotency(body)
-                self._send_json(200, self.service.ack_incident(incident_id, idem_key))
+                self._send_json(
+                    200, self.service.ack_incident(incident_id, idem_key, source="ui")
+                )
                 return
 
             if method == "GET" and path == "/logo.png":

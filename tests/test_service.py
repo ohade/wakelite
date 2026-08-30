@@ -26,13 +26,18 @@ def _bootstrap(temp_home: str):
     importlib.reload(timer_store)
     importlib.reload(service)
 
-    # Prevent tests from posting real Slack messages.
+    # Prevent tests from posting real Slack messages or firing real macOS
+    # notifications. Fixture timers are deliberately named and deliberately
+    # fail (e.g. "daemon-restart", which exits 1 to exercise restart backoff),
+    # so an unpatched notifier delivers a convincing but fake "WakeLite
+    # failure" alert to the developer's desktop on every test run.
     # Tests that need to assert on Slack calls should still use
     # patch.object(svc.notifier, "notify_slack") for explicit control.
     _real_init = service.WakeLiteService.__init__
 
     def _patched_init(self, *a, **kw):
         _real_init(self, *a, **kw)
+        self.notifier.notify = unittest.mock.MagicMock()
         self.notifier.notify_slack = unittest.mock.MagicMock(return_value="fake-ts-1234")
         def _fake_daily_thread_ts():
             self.notifier.notify_slack(":calendar: Timer activity")

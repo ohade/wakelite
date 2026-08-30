@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import error, request
+from urllib.parse import quote
 from uuid import uuid4
 
 from .config import API_HOST, API_PORT, auto_capture_terminal
@@ -211,7 +212,61 @@ def _cmd_runs_abort(args: argparse.Namespace) -> None:
 
 def _cmd_incidents_list(args: argparse.Namespace) -> None:
     include = "true" if args.include_acked else "false"
-    _print_json(_api_call("GET", f"/v1/incidents?limit={args.limit}&include_acked={include}"))
+    query = f"/v1/incidents?limit={args.limit}&include_acked={include}"
+    if getattr(args, "type", None):
+        query += f"&type={quote(args.type)}"
+    if getattr(args, "timer_id", None):
+        query += f"&timer_id={quote(args.timer_id)}"
+    _print_json(_api_call("GET", query))
+
+
+def _cmd_incidents_summary(args: argparse.Namespace) -> None:
+    _print_json(_api_call("GET", f"/v1/incidents/summary?days={args.days}"))
+
+
+def _cmd_incidents_ack_all(args: argparse.Namespace) -> None:
+    _print_json(
+        _api_call(
+            "POST",
+            "/v1/incidents/ack",
+            {
+                "idempotency_key": args.idempotency_key,
+                "type": args.type,
+                "timer_id": args.timer_id,
+                "max_id": args.max_id,
+                "source": "cli",
+            },
+        )
+    )
+
+
+def _cmd_incidents_mute_list(args: argparse.Namespace) -> None:
+    _print_json(_api_call("GET", "/v1/incidents/mutes"))
+
+
+def _cmd_incidents_mute_add(args: argparse.Namespace) -> None:
+    _print_json(
+        _api_call(
+            "POST",
+            "/v1/incidents/mutes",
+            {
+                "idempotency_key": args.idempotency_key,
+                "type": args.type,
+                "timer_id": args.timer_id,
+                "reason": args.reason,
+            },
+        )
+    )
+
+
+def _cmd_incidents_mute_rm(args: argparse.Namespace) -> None:
+    _print_json(
+        _api_call(
+            "DELETE",
+            f"/v1/incidents/mutes/{args.mute_id}",
+            {"idempotency_key": args.idempotency_key},
+        )
+    )
 
 
 
@@ -451,10 +506,44 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
     incidents_list = incidents_sub.add_parser("list")
     incidents_list.add_argument("--limit", type=int, default=200)
     incidents_list.add_argument("--include-acked", action="store_true")
+    incidents_list.add_argument("--type")
+    incidents_list.add_argument("--timer-id", dest="timer_id")
+
+    incidents_summary = incidents_sub.add_parser(
+        "summary", help="counts by type, timer, and day"
+    )
+    incidents_summary.add_argument("--days", type=int, default=30)
 
     incidents_ack = incidents_sub.add_parser("ack")
     incidents_ack.add_argument("incident_id", type=int)
     incidents_ack.add_argument("--idempotency-key", required=True)
+
+    incidents_ack_all = incidents_sub.add_parser(
+        "ack-all", help="acknowledge every open incident matching the filter"
+    )
+    incidents_ack_all.add_argument("--type")
+    incidents_ack_all.add_argument("--timer-id", dest="timer_id")
+    incidents_ack_all.add_argument(
+        "--max-id",
+        dest="max_id",
+        type=int,
+        help="only acknowledge incidents at or below this id",
+    )
+    incidents_ack_all.add_argument("--idempotency-key", required=True)
+
+    incidents_mute = incidents_sub.add_parser(
+        "mute", help="ignore rules: matching incidents arrive already resolved"
+    )
+    mute_sub = incidents_mute.add_subparsers(dest="mute_cmd", required=True)
+    mute_sub.add_parser("list")
+    mute_add = mute_sub.add_parser("add")
+    mute_add.add_argument("--type")
+    mute_add.add_argument("--timer-id", dest="timer_id")
+    mute_add.add_argument("--reason")
+    mute_add.add_argument("--idempotency-key", required=True)
+    mute_rm = mute_sub.add_parser("rm")
+    mute_rm.add_argument("mute_id", type=int)
+    mute_rm.add_argument("--idempotency-key", required=True)
 
     args = parser.parse_args()
 
@@ -551,9 +640,25 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
         if args.inc_cmd == "list":
             _cmd_incidents_list(args)
             return
+        if args.inc_cmd == "summary":
+            _cmd_incidents_summary(args)
+            return
         if args.inc_cmd == "ack":
             _cmd_incidents_ack(args)
             return
+        if args.inc_cmd == "ack-all":
+            _cmd_incidents_ack_all(args)
+            return
+        if args.inc_cmd == "mute":
+            if args.mute_cmd == "list":
+                _cmd_incidents_mute_list(args)
+                return
+            if args.mute_cmd == "add":
+                _cmd_incidents_mute_add(args)
+                return
+            if args.mute_cmd == "rm":
+                _cmd_incidents_mute_rm(args)
+                return
 
 
 if __name__ == "__main__":

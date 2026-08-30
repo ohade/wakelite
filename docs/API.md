@@ -30,8 +30,28 @@ The health response includes:
 - `POST /v1/runs/{run_id}/abort` (requires `idempotency_key`)
 
 ### Incidents
-- `GET /v1/incidents?limit=200&include_acked=true`
+- `GET /v1/incidents?limit=200&offset=0&include_acked=true&type=&severity=&timer_id=&since=`
+  — each row is enriched with `timer_name` and `timer_exists`; the response carries
+  `total_matching` for the same filter, so paging never loses the denominator
+- `GET /v1/incidents/summary?days=30` — totals, `by_type`, `by_severity`, `by_timer`
+  (with resolved timer names), and a daily `trend`. Timers deleted since an incident
+  was raised are labelled `(deleted <prefix>)` rather than dropped
 - `POST /v1/incidents/{incident_id}/ack` (requires `idempotency_key`)
+- `POST /v1/incidents/{incident_id}/unack` (requires `idempotency_key`) — reopen a
+  resolved incident
+- `POST /v1/incidents/ack` (requires `idempotency_key`) — acknowledge every open
+  incident matching `{type, severity, timer_id, since, max_id}`. Pass `max_id` to pin
+  the operation to incidents that already existed when the caller looked, so a run
+  failing mid-request is not silently resolved. Returns `acknowledged_count`
+
+### Incident ignore rules
+A rule makes matching incidents arrive already acknowledged. They are still recorded
+and still appear in the summary as evidence, but never raise the unacknowledged
+counter. `'*'` means "any"; a rule must pin at least a timer or a type.
+
+- `GET /v1/incidents/mutes`
+- `POST /v1/incidents/mutes` — body `{timer_id?, type?, reason?}` (requires `idempotency_key`)
+- `DELETE /v1/incidents/mutes/{mute_id}` (requires `idempotency_key`)
 
 ### Notification Settings
 - `GET /v1/settings/notifications` — returns the current mute state plus the most recent mute-change audit entries
