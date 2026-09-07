@@ -1,6 +1,8 @@
 import importlib
 import json
+import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -4375,6 +4377,322 @@ class DoctorTests(unittest.TestCase):
             loud = io.StringIO()
             doc.run(quiet=False, stream=loud)
             self.assertIn("healthy", loud.getvalue())
+
+
+class AlertCollapseTests(unittest.TestCase):
+    """One root cause must file one incident and a countable handful of alerts.
+
+    2026-09-07: a single held TCP port produced 38 run_failed incidents and a
+    Slack post per restart. Across 30 days the machine held 272 run_failed rows,
+    142 still unacknowledged, which is exactly how a real failure goes unseen.
+    """
+
+    _STREAK_RE = re.compile(r"streak=(\d+)")
+
+    @staticmethod
+    def _run_once(svc, timer, index):
+        svc._run_occurrence(
+            timer,
+            f"2026-09-07T10:{index:02d}:00+00:00",
+            is_catchup=False,
+            queued_reason=None,
+            retry_of_run_id=None,
+        )
+
+    @staticmethod
+    def _slack_messages(svc):
+        return [call.args[0] for call in svc.notifier.notify_slack.call_args_list]
+
+    def _sent_lines(self, captured, kind):
+        return [line for line in captured.output if "notify.sent" in line and f"kind={kind}" in line]
+
+    def test_ten_identical_failures_collapse_to_one_incident_and_three_alerts(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("collapse-storm", "exit 1"))
+
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                for index in range(10):
+                    self._run_once(svc, timer, index)
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="run_failed")
+            self.assertEqual(
+                len(incidents), 1, f"one root cause filed {len(incidents)} incident rows"
+            )
+            self.assertEqual(incidents[0]["count"], 10)
+            self.assertIsNotNone(incidents[0]["last_seen_at"])
+            self.assertGreater(incidents[0]["last_seen_at"], incidents[0]["created_at"])
+
+            sent = self._sent_lines(captured, "run_failed")
+            self.assertEqual(
+                [self._STREAK_RE.search(line).group(1) for line in sent],
+                ["1", "3", "10"],
+                f"expected alerts at streak 1/3/10, got {sent}",
+            )
+            self.assertEqual(svc.notifier.notify.call_count, 3)
+
+            started = [m for m in self._slack_messages(svc) if "started" in m.lower()]
+            self.assertEqual(
+                len(started), 2, f"a suppressed streak still posted {len(started)} start messages"
+            )
+            status_posts = [m for m in self._slack_messages(svc) if "*Failed*" in m]
+            self.assertEqual(len(status_posts), 1, f"status replies were not collapsed: {status_posts}")
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 10)
+            self.assertEqual(runtime.streak_message, "exit code 1")
+            self.assertIsNotNone(runtime.streak_started_at)
+
+    def test_success_after_a_streak_sends_exactly_one_recovery_message(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            flag = Path(td) / "exit-code"
+            flag.write_text("1")
+            timer = svc.timer_store.create_timer(
+                _basic_timer("collapse-recovery", f"exit $(cat {flag})")
+            )
+
+            for index in range(4):
+                self._run_once(svc, timer, index)
+            self.assertEqual(svc.state.get_runtime(timer["id"]).failure_streak, 4)
+
+            before = svc.notifier.notify.call_count
+            flag.write_text("0")
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                self._run_once(svc, timer, 4)
+
+            self.assertEqual(len(self._sent_lines(captured, "recovered")), 1)
+            self.assertEqual(svc.notifier.notify.call_count - before, 1)
+            recovery = svc.notifier.notify.call_args_list[-1].args[1].lower()
+            self.assertIn("recovered after 4", recovery)
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 0)
+            self.assertIsNone(runtime.streak_message)
+            self.assertEqual(runtime.last_notified_streak, 0)
+
+            # A second success must not repeat the recovery message.
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured_again:
+                logging.getLogger("wakelite.notifier").info("probe")
+                self._run_once(svc, timer, 5)
+            self.assertEqual(self._sent_lines(captured_again, "recovered"), [])
+
+    def test_a_different_failure_message_starts_a_new_streak(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            flag = Path(td) / "exit-code"
+            flag.write_text("1")
+            timer = svc.timer_store.create_timer(
+                _basic_timer("collapse-new-cause", f"exit $(cat {flag})")
+            )
+
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                for index in range(2):
+                    self._run_once(svc, timer, index)
+                flag.write_text("2")
+                self._run_once(svc, timer, 2)
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="run_failed")
+            self.assertEqual(len(incidents), 2, f"a new cause did not open its own incident: {incidents}")
+            self.assertEqual(
+                sorted((row["message"], row["count"]) for row in incidents),
+                [
+                    (f"Timer {timer['id']} failed: exit code 1", 2),
+                    (f"Timer {timer['id']} failed: exit code 2", 1),
+                ],
+            )
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 1)
+            self.assertEqual(runtime.streak_message, "exit code 2")
+
+            sent = self._sent_lines(captured, "run_failed")
+            self.assertEqual(
+                [self._STREAK_RE.search(line).group(1) for line in sent],
+                ["1", "1"],
+                f"a new cause must alert immediately, got {sent}",
+            )
+
+    def test_the_daily_slack_thread_survives_a_runner_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            _bootstrap(td)
+            import wakelite.notifier as notifier_module
+            import wakelite.state as state_module
+
+            store = state_module.StateStore()
+            first = notifier_module.Notifier(meta_store=store)
+            with patch.object(first, "notify_slack", return_value="ts-1") as post:
+                self.assertEqual(first.get_daily_thread_ts(), "ts-1")
+                post.assert_called_once()
+
+            # A fresh Notifier stands in for the next runner process.
+            second = notifier_module.Notifier(meta_store=store)
+            with patch.object(second, "notify_slack", return_value="ts-2") as post_again:
+                self.assertEqual(second.get_daily_thread_ts(), "ts-1")
+                post_again.assert_not_called()
+
+            day = datetime.now().strftime("%Y-%m-%d")
+            self.assertEqual(store.get_meta(f"slack.daily_thread_ts.{day}"), "ts-1")
+
+
+class StalledWaitTests(unittest.TestCase):
+    """A wait is fine; a wait nobody ends is a stuck poller nobody hears about.
+
+    mcp-feature-catalog-protocol-health logged 1,238 silent waits over 30 days
+    and reported nothing.
+    """
+
+    def _waiting_run(self, svc, timer, scheduled_at, created_at):
+        run = svc.state.create_run(
+            timer_id=timer["id"],
+            timer_name=timer["name"],
+            scheduled_at=scheduled_at,
+            is_catchup=False,
+            queued_reason=None,
+        )
+        svc.state.finish_run(
+            run_id=run["run_id"],
+            timer_id=timer["id"],
+            scheduled_at=scheduled_at,
+            status="waiting",
+            exit_code=75,
+            message="not ready yet (EX_TEMPFAIL)",
+            stdout_path=None,
+            stderr_path=None,
+        )
+        with svc.state._connect() as conn:
+            conn.execute(
+                "UPDATE run_history SET created_at = ?, started_at = ?, finished_at = ? WHERE run_id = ?",
+                (created_at, created_at, created_at, run["run_id"]),
+            )
+        return run["run_id"]
+
+    @staticmethod
+    def _hours_ago(hours):
+        return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    def test_a_day_of_unbroken_waiting_raises_one_info_incident(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("stuck-poller", "exit 75"))
+            for hours in (30, 20, 1):
+                self._waiting_run(svc, timer, f"2026-09-06T{hours:02d}:00:00+00:00", self._hours_ago(hours))
+
+            svc._report_stalled_waits()
+            svc._report_stalled_waits()
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="waiting_stalled")
+            self.assertEqual(len(incidents), 1, f"a stalled wait filed {len(incidents)} rows")
+            self.assertEqual(incidents[0]["severity"], "info")
+            self.assertEqual(incidents[0]["timer_id"], timer["id"])
+            self.assertEqual(incidents[0]["count"], 2)
+            self.assertIn("waiting", incidents[0]["message"].lower())
+
+    def test_a_short_wait_or_a_settled_timer_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            fresh = svc.timer_store.create_timer(_basic_timer("fresh-wait", "exit 75"))
+            self._waiting_run(svc, fresh, "2026-09-07T09:00:00+00:00", self._hours_ago(2))
+
+            settled = svc.timer_store.create_timer(_basic_timer("settled-wait", "exit 75"))
+            self._waiting_run(svc, settled, "2026-09-06T04:00:00+00:00", self._hours_ago(30))
+            run = svc.state.create_run(
+                timer_id=settled["id"],
+                timer_name=settled["name"],
+                scheduled_at="2026-09-07T09:00:00+00:00",
+                is_catchup=False,
+                queued_reason=None,
+            )
+            svc.state.finish_run(
+                run_id=run["run_id"],
+                timer_id=settled["id"],
+                scheduled_at="2026-09-07T09:00:00+00:00",
+                status="success",
+                exit_code=0,
+                message="completed",
+                stdout_path=None,
+                stderr_path=None,
+            )
+
+            svc._report_stalled_waits()
+
+            self.assertEqual(svc.state.list_incidents(limit=50, incident_type="waiting_stalled"), [])
+
+
+class DaemonFlapBreakerTests(unittest.TestCase):
+    """A daemon that dies just past the old 60s floor must stay backed off.
+
+    With the floor at 60, cmux-focus-server died every ~65s, cleared its backoff
+    on every attempt and restarted 37 times in a row at full speed.
+    """
+
+    def _daemon(self, svc, name):
+        return svc.timer_store.create_timer({
+            "name": name,
+            "comment": "Daemon under the flap breaker",
+            "enabled": True,
+            "timer_type": "daemon",
+            "recurrence": {"frequency": "interval", "every": "0s"},
+            "execution": {
+                "restart_on_failure": True,
+                "restart_delay_seconds": 5,
+                "restart_max_backoff_seconds": 300,
+            },
+            "command": {"mode": "shell", "shell": "exit 1"},
+        })
+
+    @staticmethod
+    def _run_with_uptime(svc, timer, uptime):
+        """Drive one real daemon run whose measured uptime is `uptime` seconds."""
+        import wakelite.service as service_module
+
+        calls = []
+
+        def fake_monotonic():
+            calls.append(None)
+            return 1000.0 if len(calls) == 1 else 1000.0 + uptime
+
+        with patch.object(service_module.time, "monotonic", fake_monotonic):
+            svc._run_occurrence(
+                timer,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                is_catchup=False,
+                queued_reason="daemon_start",
+                retry_of_run_id=None,
+            )
+
+    def test_uptime_below_the_healthy_floor_keeps_the_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = self._daemon(svc, "daemon-fast-flap")
+            svc.state.set_daemon_state(timer["id"], status="stopped", current_backoff_seconds=120)
+
+            self._run_with_uptime(svc, timer, uptime=65.0)
+
+            self.assertEqual(
+                svc.state.get_daemon_state(timer["id"]).current_backoff_seconds,
+                120,
+                "a daemon that died after 65s was treated as healthy and reset its backoff",
+            )
+
+    def test_uptime_past_the_healthy_floor_clears_the_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = self._daemon(svc, "daemon-long-lived")
+            svc.state.set_daemon_state(timer["id"], status="stopped", current_backoff_seconds=120)
+
+            self._run_with_uptime(svc, timer, uptime=400.0)
+
+            self.assertEqual(
+                svc.state.get_daemon_state(timer["id"]).current_backoff_seconds, 0
+            )
 
 
 if __name__ == "__main__":
