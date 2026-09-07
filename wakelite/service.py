@@ -2767,8 +2767,9 @@ end tell'''],
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
 
+    @classmethod
     def _identify_orphan(
-        self, pid: int, run_id: str, recorded_start: Optional[str]
+        cls, pid: int, run_id: str, recorded_start: Optional[str]
     ) -> Tuple[Optional[bool], str]:
         """Decide whether `pid` is still the process we spawned for `run_id`.
 
@@ -2777,18 +2778,22 @@ end tell'''],
 
         Two proofs, because neither is available everywhere:
 
-        - The WAKELITE_RUN_ID env marker. macOS 26 strips the environment from
-          `ps -E` for non-root callers, so on this machine it never fires; it is
-          the corroborating proof, kept for root runners and for Linux.
-        - The process start time recorded at spawn. A recycled PID belongs to a
-          process that started at a different instant, so this is the proof that
-          actually carries the check today.
+        - The WAKELITE_RUN_ID env marker, the stronger proof: it names the exact
+          run. SIP hides the environment from `ps -E` for platform binaries only,
+          NOT from non-root callers generally. Measured on this machine: a
+          Homebrew-Python child exposes 144 env vars and the marker reads back
+          through the `zsh -lc 'exec ...'` spawn path, while `/bin/bash` and
+          `/bin/sleep` children expose none. So it fires for cmux-focus-server
+          and slack-agent, and never for claude-callout.
+        - The process start time recorded at spawn, the fallback that covers the
+          platform-binary children. A recycled PID belongs to a process that
+          started at a different instant.
 
         Command-line matching is deliberately absent: the timer command is
         `exec /opt/homebrew/bin/python3 <script>` while the live process reports
         argv[0] as `/opt/homebrew/Cellar/python@3.14/.../Python`.
         """
-        environ = self._pid_environ(pid)
+        environ = cls._pid_environ(pid)
         if environ and "WAKELITE_RUN_ID=" in environ:
             if f"WAKELITE_RUN_ID={run_id}" in environ:
                 return True, "WAKELITE_RUN_ID env marker"
@@ -2796,7 +2801,7 @@ end tell'''],
 
         if not recorded_start:
             return None, "no recorded process start time and no readable env marker"
-        observed_start = self._pid_start_time(pid)
+        observed_start = cls._pid_start_time(pid)
         if not observed_start:
             return None, "process start time unreadable"
         if observed_start == recorded_start:
@@ -2818,23 +2823,24 @@ end tell'''],
         except OSError:
             return False
 
-    def _kill_orphan(self, pid: int) -> bool:
+    @classmethod
+    def _kill_orphan(cls, pid: int) -> bool:
         """SIGTERM then SIGKILL. Returns True if the kill had to be forced.
 
         The orphan was reparented to launchd when the previous runner died, so
         there is no child to wait() on — liveness is polled instead.
         """
-        if not self._signal_orphan(pid, signal.SIGTERM):
+        if not cls._signal_orphan(pid, signal.SIGTERM):
             return False
-        deadline = time.time() + self.ORPHAN_RECLAIM_GRACE_SECONDS
+        deadline = time.time() + cls.ORPHAN_RECLAIM_GRACE_SECONDS
         while time.time() < deadline:
-            if not self._pid_alive(pid):
+            if not cls._pid_alive(pid):
                 return False
             time.sleep(0.1)
 
-        self._signal_orphan(pid, signal.SIGKILL)
+        cls._signal_orphan(pid, signal.SIGKILL)
         deadline = time.time() + 2.0
-        while time.time() < deadline and self._pid_alive(pid):
+        while time.time() < deadline and cls._pid_alive(pid):
             time.sleep(0.05)
         return True
 
@@ -2953,6 +2959,11 @@ end tell'''],
             )
 
     def _reclaim_orphaned_processes(self) -> List[Dict[str, Any]]:
+        """Reclaim this runner's orphans at startup. See reclaim_orphans()."""
+        return self.reclaim_orphans_for_state(self.state)
+
+    @classmethod
+    def reclaim_orphans_for_state(cls, state: Any) -> List[Dict[str, Any]]:
         """Kill children that outlived an unclean exit of a previous runner.
 
         stop() terminates every child, but a SIGKILL or a power cut does not:
@@ -2965,17 +2976,17 @@ end tell'''],
         """
         outcomes: List[Dict[str, Any]] = []
         try:
-            rows = self.state.list_active_runs()
+            rows = state.list_active_runs()
         except Exception:
             logger.warning("Orphan reclaim could not read active runs", exc_info=True)
             return outcomes
         if not rows:
             return outcomes
 
-        boot_time = self._boot_time()
+        boot_time = cls._boot_time()
         for row in rows:
             try:
-                outcomes.append(self._reclaim_one_orphan(row, boot_time))
+                outcomes.append(cls._reclaim_one_orphan(state, row, boot_time))
             except Exception:
                 # One unreadable row must not stop the runner from starting.
                 logger.warning("Orphan reclaim failed for row %s", row, exc_info=True)
@@ -2988,8 +2999,9 @@ end tell'''],
                 })
         return outcomes
 
+    @classmethod
     def _reclaim_one_orphan(
-        self, row: Dict[str, Any], boot_time: Optional[datetime]
+        cls, state: Any, row: Dict[str, Any], boot_time: Optional[datetime]
     ) -> Dict[str, Any]:
         run_id = row.get("run_id")
         timer_id = row.get("timer_id")
@@ -3002,20 +3014,20 @@ end tell'''],
             return outcome("no_pid")
         pid = int(pid)
 
-        started_at = self._parse_iso(row.get("started_at"))
+        started_at = cls._parse_iso(row.get("started_at"))
         if boot_time and started_at and started_at < boot_time:
             # The machine rebooted since this run started, so nothing of it
             # survives and the PID now certainly names something else.
             logger.info("Orphan reclaim skipping run %s (pid %s): started before boot", run_id, pid)
             return outcome("skipped_pre_boot")
 
-        if not self._pid_alive(pid):
+        if not cls._pid_alive(pid):
             return outcome("dead")
 
-        is_ours, evidence = self._identify_orphan(pid, run_id, row.get("pid_started_at"))
+        is_ours, evidence = cls._identify_orphan(pid, run_id, row.get("pid_started_at"))
 
         if is_ours is None:
-            self.state.add_incident(
+            state.add_incident(
                 "warn",
                 "orphan_unverified",
                 f"PID {pid} from run {run_id} of timer {timer_id} is alive but its identity "
@@ -3025,7 +3037,7 @@ end tell'''],
             return outcome("unverified", evidence)
 
         if not is_ours:
-            self.state.add_incident(
+            state.add_incident(
                 "warn",
                 "pid_reused",
                 f"PID {pid} recorded for run {run_id} of timer {timer_id} now belongs to "
@@ -3034,12 +3046,12 @@ end tell'''],
             )
             return outcome("pid_reused", evidence)
 
-        forced = self._kill_orphan(pid)
+        forced = cls._kill_orphan(pid)
         logger.warning(
             "Reclaimed orphaned pid %s from timer %s (run %s, forced=%s)",
             pid, timer_id, run_id, forced,
         )
-        self.state.add_incident(
+        state.add_incident(
             "warn",
             "orphan_reclaimed",
             f"Reclaimed orphaned pid {pid} from timer {timer_id} (run {run_id}) that "
@@ -3606,3 +3618,18 @@ end tell'''],
             pass
 
         return forced_kill
+
+
+def reclaim_orphans(state: Any) -> List[Dict[str, Any]]:
+    """Reclaim children that outlived an unclean runner exit.
+
+    The entrypoint `wakelite.doctor` resolves by name (see
+    `doctor._resolve_orphan_reclaim`). It takes a bare state store rather than a
+    service because `doctor --fix` runs without a live runner — that is the whole
+    point of doctor, which must work when the runner is hung.
+
+    Same implementation the runner uses at startup, reached through
+    `WakeLiteService.reclaim_orphans_for_state`, so the scheduled path and the
+    manual path can never drift apart.
+    """
+    return WakeLiteService.reclaim_orphans_for_state(state)

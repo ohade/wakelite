@@ -4726,6 +4726,71 @@ class ReclaimHookContractTests(unittest.TestCase):
         )
 
 
+    def test_resolved_hook_actually_reclaims_a_live_orphan(self):
+        """The entrypoint must do the work, not merely exist.
+
+        A no-op `def reclaim_orphans(state): return []` satisfies the
+        resolution test above while leaving `doctor --fix` just as inert as a
+        missing hook. This drives a real process through the resolved hook.
+        """
+        from wakelite import doctor
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "doctor-reclaim-target",
+                "comment": "Orphan reclaimed through the doctor entrypoint",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 120"},
+            })
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+
+            # set_runtime_running is what creates the active_runs row the
+            # reclaim reads; create_run alone leaves nothing to update.
+            svc.state.set_runtime_running(timer["id"], run["run_id"], scheduled_at)
+
+            proc = subprocess.Popen(["/bin/sleep", "120"], start_new_session=True)
+            self.addCleanup(proc.wait)
+            self.addCleanup(OrphanReclaimTests._kill_pid, self, proc.pid)
+
+            svc.state.update_active_run_pid(
+                run["run_id"], proc.pid, WakeLiteService._pid_start_time(proc.pid)
+            )
+
+            hook = doctor._resolve_orphan_reclaim()
+            self.assertIsNotNone(hook, "no entrypoint to exercise")
+            outcomes = hook(svc.state)
+
+            # Reap before asserting: a SIGKILLed child of this test process
+            # stays a zombie until wait(), and os.kill(pid, 0) still succeeds
+            # for a zombie, so a PID probe cannot tell terminated from alive.
+            try:
+                returncode = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.fail("the resolved hook returned without terminating the orphan")
+            self.assertLess(
+                returncode, 0,
+                f"orphan exited {returncode}, expected termination by signal",
+            )
+            self.assertTrue(outcomes, "the hook reported no outcomes for a reclaimed orphan")
+            self.assertTrue(
+                any(o.get("pid") == proc.pid for o in outcomes),
+                f"outcomes do not mention the reclaimed pid: {outcomes}",
+            )
+
+
 
 if __name__ == "__main__":
     unittest.main()
