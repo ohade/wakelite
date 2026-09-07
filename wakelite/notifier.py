@@ -51,9 +51,12 @@ def _resolve_slack_token() -> Optional[str]:
 class Notifier:
     _poster_cache: Any = _UNRESOLVED
 
-    def __init__(self) -> None:
+    def __init__(self, meta_store: Any = None) -> None:
         self.muted = False
         self._daily_thread_ts_by_day: dict[str, str] = {}
+        # Anything exposing get_meta/set_meta (the StateStore in practice), so
+        # today's Slack thread outlives this process.
+        self._meta_store = meta_store
 
     @staticmethod
     def ui_url(fragment: str = "") -> str:
@@ -194,16 +197,48 @@ class Notifier:
             logger.warning("Slack notify error", exc_info=True)
             return None
 
+    def log_sent(self, kind: str, timer_id: str, streak: int = 0) -> None:
+        """Record one delivered notification, so alerts can be counted.
+
+        Delivery used to be logged only when it failed, which left no way to
+        answer "how many alerts did that outage send?" from the runner log —
+        the one question an alert-collapse policy has to be checked against.
+        """
+        logger.info("notify.sent timer=%s kind=%s streak=%d", timer_id, kind, int(streak))
+
+    def _thread_meta_key(self, day: str) -> str:
+        return f"slack.daily_thread_ts.{day}"
+
     def get_daily_thread_ts(self, channel: str = SLACK_CHANNEL) -> Optional[str]:
-        """Return today's WakeLite Slack thread root, creating it if needed."""
+        """Return today's WakeLite Slack thread root, creating it if needed.
+
+        Persisted per day: the id used to live only in memory, so every runner
+        restart opened another "Timer activity" thread and scattered the day's
+        runs across as many threads as the runner had lives.
+        """
         day = datetime.now().strftime("%Y-%m-%d")
         cached = self._daily_thread_ts_by_day.get(day)
         if cached:
             return cached
 
+        stored = None
+        if self._meta_store is not None:
+            try:
+                stored = self._meta_store.get_meta(self._thread_meta_key(day))
+            except Exception:
+                logger.warning("Reading the persisted Slack thread failed", exc_info=True)
+        if stored:
+            self._daily_thread_ts_by_day[day] = stored
+            return stored
+
         ts = self.notify_slack(f"Timer activity - {day}", channel=channel)
         if ts:
             self._daily_thread_ts_by_day[day] = ts
+            if self._meta_store is not None:
+                try:
+                    self._meta_store.set_meta(self._thread_meta_key(day), ts)
+                except Exception:
+                    logger.warning("Persisting the Slack thread failed", exc_info=True)
         return ts
 
     def should_emit_morning_digest(self, now: datetime) -> bool:

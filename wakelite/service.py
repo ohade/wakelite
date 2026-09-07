@@ -67,7 +67,7 @@ class WakeLiteService:
         self._started_monotonic = time.monotonic()
         self.timer_store = TimerStore()
         self.state = StateStore()
-        self.notifier = Notifier()
+        self.notifier = Notifier(meta_store=self.state)
         self.notifier.muted = self.state.get_meta("notifications.muted", "false") == "true"
         self._stop = threading.Event()
         self._wake_event = threading.Event()
@@ -778,6 +778,7 @@ class WakeLiteService:
                     prune_counter += 1
                     if prune_counter >= max(1, int(3600 / self.tick_seconds)):
                         self._prune()
+                        self._report_stalled_waits()
                         prune_counter = 0
 
                 if consecutive_errors > 0:
@@ -2201,6 +2202,10 @@ end tell'''],
 
         notifications = timer.get("notifications") or {}
         slack_activity_enabled = notifications.get("slackActivity", True)
+        # A failure that keeps repeating is one story, not one story per run.
+        # Once the streak is established, the per-run Slack chatter is what
+        # buries everything else, so it goes quiet until the streak ends.
+        streak_open = self.state.get_runtime(timer_id).failure_streak >= self.STREAK_QUIET_FROM
 
         # For timers not bound to a specific session, create a Slack thread
         # so all notifications for this run are grouped under one parent.
@@ -2209,7 +2214,7 @@ end tell'''],
         slack_thread_ts: Optional[str] = None
         callback = timer.get("callback") or {}
         session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
-        if slack_activity_enabled and not session_bound:
+        if slack_activity_enabled and not session_bound and not streak_open:
             try:
                 timer_name = timer.get("name", timer_id)
                 slack_thread_ts = self.notifier.get_daily_thread_ts()
@@ -2379,6 +2384,7 @@ end tell'''],
                 return
             # Delete failed — fall through to normal post-run processing
 
+        streak_after = 0
         if status == "shutdown":
             # Planned teardown from stop(): no incident and no notification. The
             # run row already records it, and a runner restart is not an event
@@ -2386,31 +2392,62 @@ end tell'''],
             # source of self-inflicted run_failed noise.
             pass
         elif status not in ("success", "aborted", "waiting"):
-            self.state.add_incident(
+            streak = self.state.bump_failure_streak(timer_id, message)
+            streak_after = streak.failure_streak
+            # The incident message must not carry scheduled_at: it is the key
+            # repeats are folded onto, and a per-run key files a per-run row.
+            self.state.record_incident(
                 "error",
                 "run_failed",
-                f"Timer {timer_id} failed at {scheduled_at}: {message}",
+                f"Timer {timer_id} failed: {message}",
                 timer_id,
             )
-            if notify_on_failure:
+            if notify_on_failure and self._streak_alert_due(streak):
+                self.state.mark_streak_notified(timer_id, streak.failure_streak)
+                self._deliver_streak_alert(
+                    timer,
+                    kind="run_failed",
+                    streak=streak.failure_streak,
+                    title="WakeLite failure",
+                    body=self._streak_alert_body(timer, message, streak),
+                    slack_thread_ts=slack_thread_ts,
+                    slack_activity_enabled=slack_activity_enabled,
+                )
+        else:
+            recovered = False
+            if status == "success":
+                # Only a success ends a streak. A wait or an abort says nothing
+                # about whether the cause is gone.
+                ended = self.state.reset_failure_streak(timer_id)
+                recovered = ended.failure_streak >= self.STREAK_RECOVERY_FROM
+                if recovered:
+                    self._deliver_streak_alert(
+                        timer,
+                        kind="recovered",
+                        streak=ended.failure_streak,
+                        title="WakeLite recovered",
+                        body=(
+                            f"{timer.get('name', timer_id)} recovered after "
+                            f"{ended.failure_streak} failures ({ended.streak_message})"
+                        ),
+                        slack_thread_ts=slack_thread_ts,
+                        slack_activity_enabled=slack_activity_enabled,
+                    )
+            if notify_on_success and not recovered:
                 self.notifier.notify(
-                    "WakeLite failure",
-                    f"{timer.get('name', timer_id)} failed: {message}",
+                    "WakeLite success",
+                    f"{timer.get('name', timer_id)} completed at {scheduled_at}",
                     open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
                     group=f"wakelite-timer-{timer_id}",
                 )
-        elif notify_on_success:
-            self.notifier.notify(
-                "WakeLite success",
-                f"{timer.get('name', timer_id)} completed at {scheduled_at}",
-                open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
-                group=f"wakelite-timer-{timer_id}",
-            )
 
-        # Always close the Slack thread with a status reply (if we opened one).
-        # This is independent of macOS notification preferences — the thread parent
-        # already created the Slack "noise", so leaving it without a reply is worse.
-        if slack_thread_ts:
+        # Always close the Slack thread with a status reply (if we opened one),
+        # unless this run is one of a streak: the streak alert already says what
+        # is wrong, and a reply per repeat is the other half of the storm.
+        # Otherwise this is independent of macOS notification preferences — the
+        # thread parent already created the Slack "noise", so leaving it without
+        # a reply is worse.
+        if slack_thread_ts and streak_after < self.STREAK_QUIET_FROM:
             if status == "aborted":
                 emoji, label = ":stop_sign:", "Aborted"
             elif status == "shutdown":
@@ -2711,6 +2748,105 @@ end tell'''],
             group="wakelite-digest",
         )
         self.state.set_meta("digest.last_day", day_key)
+
+    # Alert policy for a repeating failure. One root cause on 2026-09-07 sent
+    # 38 alerts and filed 38 incidents; these gates turn that into 3 alerts and
+    # one incident carrying a count.
+    STREAK_ALERT_POINTS = (1, 3, 10)
+    # Beyond the last gate, one alert per hour for as long as the streak runs.
+    STREAK_ALERT_INTERVAL_SECONDS = 3600
+    # A streak this long has already been alerted on, so the per-run Slack
+    # "started" and status posts stop until it ends.
+    STREAK_QUIET_FROM = 2
+    # Below this, a recovery message would be noisier than the failure was.
+    STREAK_RECOVERY_FROM = 3
+
+    def _streak_alert_due(self, runtime: Any) -> bool:
+        """Whether this failure is one the operator should hear about."""
+        streak = runtime.failure_streak
+        if streak <= 0:
+            return False
+        if streak in self.STREAK_ALERT_POINTS:
+            # Guards a replayed run: a gate already spent stays spent.
+            return streak > runtime.last_notified_streak
+        if streak < max(self.STREAK_ALERT_POINTS):
+            return False
+        last_notified = runtime.last_notified_at
+        if not last_notified:
+            return True
+        try:
+            sent_at = datetime.fromisoformat(str(last_notified).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - sent_at).total_seconds()
+        return elapsed >= self.STREAK_ALERT_INTERVAL_SECONDS
+
+    def _streak_alert_body(self, timer: Dict[str, Any], message: str, runtime: Any) -> str:
+        name = timer.get("name", timer["id"])
+        if runtime.failure_streak <= 1:
+            return f"{name} failed: {message}"
+        return (
+            f"{name} failed {runtime.failure_streak} times in a row: {message}"
+            f" (since {runtime.streak_started_at})"
+        )
+
+    def _deliver_streak_alert(
+        self,
+        timer: Dict[str, Any],
+        kind: str,
+        streak: int,
+        title: str,
+        body: str,
+        slack_thread_ts: Optional[str],
+        slack_activity_enabled: bool,
+    ) -> None:
+        """Deliver one streak alert to the desktop and to Slack, and count it."""
+        timer_id = timer["id"]
+        self.notifier.notify(
+            title,
+            body,
+            open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
+            group=f"wakelite-timer-{timer_id}",
+        )
+        # Slack only hears about the alert once the streak has silenced the
+        # per-run posts. Below that the run's own status reply already carries
+        # the failure, and posting both would add a fourth Slack message to a
+        # single failed run — the opposite of the point.
+        if slack_activity_enabled and streak >= self.STREAK_QUIET_FROM:
+            emoji = ":white_check_mark:" if kind == "recovered" else ":rotating_light:"
+            thread_ts = slack_thread_ts
+            if thread_ts is None:
+                # The per-run thread was suppressed by the streak, so hang the
+                # alert off today's thread rather than posting at top level.
+                try:
+                    thread_ts = self.notifier.get_daily_thread_ts()
+                except Exception:
+                    thread_ts = None
+                    logger.warning("Slack thread lookup failed for streak alert on %s", timer_id, exc_info=True)
+            self.notifier.notify_slack(f"{emoji} *{title}*\n{body}", thread_ts=thread_ts)
+        self.notifier.log_sent(kind, timer_id, streak)
+
+    def _report_stalled_waits(self, hours: int = 24) -> int:
+        """File one info incident per timer that has been waiting for a day.
+
+        Exit 75 is a healthy "not yet", so it raises nothing per run. That is
+        also why a poller can wait for a month without anyone hearing: one
+        timer logged 1,238 waits in 30 days and reported none.
+        """
+        reported = 0
+        for stuck in self.state.stale_waiting_timers(hours):
+            timer = self.timer_store.get_timer(stuck["timer_id"])
+            name = timer.get("name", stuck["timer_id"]) if timer else stuck["timer_id"]
+            self.state.record_incident(
+                "info",
+                "waiting_stalled",
+                f"Timer {name} has been waiting since {stuck['first_wait']} without settling",
+                stuck["timer_id"],
+            )
+            reported += 1
+        return reported
 
     @staticmethod
     def _healthy_uptime_threshold(timer: Dict[str, Any]) -> float:

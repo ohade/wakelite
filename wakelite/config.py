@@ -34,7 +34,12 @@ RUN_LOG_RETENTION_DAYS = 7
 # How long a daemon must stay up before its restart backoff is considered
 # recovered. Below this, a crash-looping daemon would clear the backoff on
 # every attempt and defeat it entirely.
-DAEMON_HEALTHY_UPTIME_SECONDS = 60
+#
+# 2026-09-07: at 60s, cmux-focus-server died every ~65s holding a port it could
+# never rebind, cleared the backoff on each attempt and burned 37 restarts at
+# full speed. The floor has to outlast the slowest flap we have seen, so a
+# daemon has to prove five minutes of life before the backoff is forgiven.
+DAEMON_HEALTHY_UPTIME_SECONDS = 300
 DEFAULT_HORIZON_DAYS = 21
 
 MAX_WORKERS = 16
