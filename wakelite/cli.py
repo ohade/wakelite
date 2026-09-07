@@ -392,7 +392,8 @@ def main() -> None:
     "restart_max_backoff_seconds": 300
   },
   "resources": [                                # optional (v2) - declare external resources
-    { "name": "slack-api", "capacity": "50 req/min", "estimated_usage": "6 req/min" }
+    { "name": "slack-api", "capacity": "50 req/min", "estimated_usage": "6 req/min" },
+    { "name": "listen-port", "port": 17382 }      #   daemons: port reclaimed before spawn
   ],
   "command": {                                  # required
     "mode": "shell",                            #   "shell" or "exec"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -52,6 +54,10 @@ class IdempotencyConflictError(ValueError):
 
 class CapacityExceededError(ValueError):
     pass
+
+
+class DeclaredPortHeldError(RuntimeError):
+    """A daemon's declared port is held by a process we must not kill."""
 
 
 class WakeLiteService:
@@ -208,6 +214,11 @@ class WakeLiteService:
         return response
 
     def start(self) -> None:
+        # Must run before the loop below. set_runtime_idle() without a run_id
+        # deletes every active_runs row for the timer, and those rows carry the
+        # PIDs of children that outlived an unclean exit.
+        self._reclaim_orphaned_processes()
+
         recovered = self.state.recover_uncertain_runs()
         recovered_timer_ids: set[str] = set()
         for row in recovered:
@@ -2344,6 +2355,11 @@ end tell'''],
         command = timer.get("command", {})
         env = os.environ.copy()
         env.update({k: str(v) for k, v in (command.get("env") or {}).items()})
+        # Identity markers for orphan reclaim. Set after the timer's own env so
+        # a timer cannot overwrite them. They survive exec and argv rewriting,
+        # which command-line matching does not.
+        env["WAKELITE_RUN_ID"] = run_id
+        env["WAKELITE_TIMER_ID"] = timer_id
         cwd = command.get("workingDirectory") or str(Path.home())
 
         status = "failed"
@@ -2363,6 +2379,11 @@ end tell'''],
                     exit_code = -15
                     message = "aborted by user"
                 else:
+                    if timer.get("timer_type") == "daemon":
+                        # Raises DeclaredPortHeldError, which the handler below
+                        # turns into a failed run rather than a hot restart loop.
+                        self._ensure_declared_ports_free(timer)
+
                     if command.get("mode") == "shell":
                         cmd = ["/bin/zsh", "-lc", command.get("shell", "")]
                     else:
@@ -2381,7 +2402,9 @@ end tell'''],
                     with self._run_lock:
                         self._active_processes[run_id] = proc
                         self._spawning_runs.discard(run_id)
-                    self.state.update_active_run_pid(run_id, proc.pid)
+                    self.state.update_active_run_pid(
+                        run_id, proc.pid, self._pid_start_time(proc.pid)
+                    )
 
                     if announce_start:
                         slack_thread_ts = self._post_run_started(timer, run_id, scheduled_at)
@@ -2628,6 +2651,360 @@ end tell'''],
     # race its own daemon spawn and clear the runtime row before Popen happens.
     DAEMON_SPAWN_GRACE_SECONDS = 30
 
+    # Time an orphan gets between SIGTERM and SIGKILL during startup reclaim.
+    ORPHAN_RECLAIM_GRACE_SECONDS = 5.0
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)  # signal 0 = existence check
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists, we just may not signal it
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _ps_field(pid: int, fmt: str, *flags: str) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ["ps", *flags, "-o", fmt, "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    @classmethod
+    def _pid_start_time(cls, pid: int) -> Optional[str]:
+        """OS-reported process start time, e.g. 'Mon Sep  7 20:07:13 2026'."""
+        return cls._ps_field(pid, "lstart=")
+
+    @classmethod
+    def _pid_environ(cls, pid: int) -> Optional[str]:
+        return cls._ps_field(pid, "args=", "-E")
+
+    @staticmethod
+    def _boot_time() -> Optional[datetime]:
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "kern.boottime"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        match = re.search(r"sec\s*=\s*(\d+)", result.stdout)
+        if not match:
+            return None
+        try:
+            return datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_iso(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _identify_orphan(
+        self, pid: int, run_id: str, recorded_start: Optional[str]
+    ) -> Tuple[Optional[bool], str]:
+        """Decide whether `pid` is still the process we spawned for `run_id`.
+
+        Returns (verdict, evidence); a None verdict means "cannot tell", which
+        must be treated as "not ours" so we never signal a stranger.
+
+        Two proofs, because neither is available everywhere:
+
+        - The WAKELITE_RUN_ID env marker. macOS 26 strips the environment from
+          `ps -E` for non-root callers, so on this machine it never fires; it is
+          the corroborating proof, kept for root runners and for Linux.
+        - The process start time recorded at spawn. A recycled PID belongs to a
+          process that started at a different instant, so this is the proof that
+          actually carries the check today.
+
+        Command-line matching is deliberately absent: the timer command is
+        `exec /opt/homebrew/bin/python3 <script>` while the live process reports
+        argv[0] as `/opt/homebrew/Cellar/python@3.14/.../Python`.
+        """
+        environ = self._pid_environ(pid)
+        if environ and "WAKELITE_RUN_ID=" in environ:
+            if f"WAKELITE_RUN_ID={run_id}" in environ:
+                return True, "WAKELITE_RUN_ID env marker"
+            return False, "WAKELITE_RUN_ID env marker names a different run"
+
+        if not recorded_start:
+            return None, "no recorded process start time and no readable env marker"
+        observed_start = self._pid_start_time(pid)
+        if not observed_start:
+            return None, "process start time unreadable"
+        if observed_start == recorded_start:
+            return True, f"process start time {observed_start}"
+        return False, f"process start time {observed_start} != recorded {recorded_start}"
+
+    @staticmethod
+    def _signal_orphan(pid: int, sig: int) -> bool:
+        # Children are spawned with start_new_session=True, so the PID is its own
+        # process-group leader and the group is entirely ours to signal.
+        try:
+            os.killpg(pid, sig)
+            return True
+        except OSError:
+            pass
+        try:
+            os.kill(pid, sig)
+            return True
+        except OSError:
+            return False
+
+    def _kill_orphan(self, pid: int) -> bool:
+        """SIGTERM then SIGKILL. Returns True if the kill had to be forced.
+
+        The orphan was reparented to launchd when the previous runner died, so
+        there is no child to wait() on — liveness is polled instead.
+        """
+        if not self._signal_orphan(pid, signal.SIGTERM):
+            return False
+        deadline = time.time() + self.ORPHAN_RECLAIM_GRACE_SECONDS
+        while time.time() < deadline:
+            if not self._pid_alive(pid):
+                return False
+            time.sleep(0.1)
+
+        self._signal_orphan(pid, signal.SIGKILL)
+        deadline = time.time() + 2.0
+        while time.time() < deadline and self._pid_alive(pid):
+            time.sleep(0.05)
+        return True
+
+    @staticmethod
+    def _declared_ports(timer: Dict[str, Any]) -> List[int]:
+        ports: List[int] = []
+        for res in timer.get("resources") or []:
+            if not isinstance(res, dict):
+                continue
+            port = res.get("port")
+            if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+                ports.append(port)
+        return ports
+
+    @staticmethod
+    def _port_is_free(port: int) -> bool:
+        # No SO_REUSEADDR: the point is to notice a live listener, and
+        # SO_REUSEADDR would let the bind succeed against one in TIME_WAIT.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError as exc:
+            return exc.errno not in (errno.EADDRINUSE, errno.EACCES)
+        finally:
+            sock.close()
+
+    @staticmethod
+    def _port_holder_pid(port: int) -> Optional[int]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        for token in result.stdout.split():
+            try:
+                return int(token)
+            except ValueError:
+                continue
+        return None
+
+    def _process_holds_timer_logs(self, pid: int, timer_id: str) -> bool:
+        """True if `pid` has a run log of `timer_id` open as one of its files.
+
+        A child inherits the run's stdout/stderr across exec, so this identifies
+        our own orphan even after its active_runs row was deleted — the case the
+        env marker cannot cover on a macOS that hides process environments.
+        The runner itself holds those same handles while a run is live, so its
+        own PID is excluded.
+        """
+        if pid == os.getpid():
+            return False
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return f"{LOG_DIR}/{timer_id}/" in result.stdout
+
+    def _port_holder_is_ours(self, pid: int, timer_id: str) -> Tuple[bool, str]:
+        """Ownership check for a process found by port, not by active_runs row.
+
+        The startup reclaim identifies a run; this identifies a timer, because
+        the holder is an earlier run of the same daemon and its active_runs row
+        is usually already gone.
+        """
+        environ = self._pid_environ(pid)
+        if environ and "WAKELITE_TIMER_ID=" in environ:
+            if f"WAKELITE_TIMER_ID={timer_id}" in environ:
+                return True, "WAKELITE_TIMER_ID env marker"
+            return False, "WAKELITE_TIMER_ID env marker names a different timer"
+        if self._process_holds_timer_logs(pid, timer_id):
+            return True, f"open run log of timer {timer_id}"
+        return False, "no WakeLite ownership evidence"
+
+    def _ensure_declared_ports_free(self, timer: Dict[str, Any]) -> None:
+        """Clear each declared port before a daemon spawns, or refuse to spawn.
+
+        Without this a daemon whose orphan escaped the startup reclaim burns its
+        whole restart budget on EADDRINUSE, which is how the 2026-09-07 incident
+        produced 37 consecutive failures.
+        """
+        timer_id = timer["id"]
+        for port in self._declared_ports(timer):
+            if self._port_is_free(port):
+                continue
+
+            holder = self._port_holder_pid(port)
+            if holder is None:
+                message = f"port {port} is in use and no listening holder could be identified"
+                self.state.add_incident("warn", "resource_held_by_foreign", f"Timer {timer_id} not spawned: {message}", timer_id)
+                raise DeclaredPortHeldError(message)
+
+            is_ours, evidence = self._port_holder_is_ours(holder, timer_id)
+            if not is_ours:
+                message = f"port {port} is held by foreign pid {holder} ({evidence})"
+                self.state.add_incident("warn", "resource_held_by_foreign", f"Timer {timer_id} not spawned: {message}", timer_id)
+                raise DeclaredPortHeldError(message)
+
+            forced = self._kill_orphan(holder)
+            logger.warning("Reclaimed port %s from orphaned pid %s of timer %s", port, holder, timer_id)
+            self.state.add_incident(
+                "warn",
+                "orphan_reclaimed",
+                f"Reclaimed port {port} from orphaned pid {holder} of timer {timer_id}; "
+                f"identified by {evidence}" + ("; required SIGKILL" if forced else ""),
+                timer_id,
+            )
+
+    def _reclaim_orphaned_processes(self) -> List[Dict[str, Any]]:
+        """Kill children that outlived an unclean exit of a previous runner.
+
+        stop() terminates every child, but a SIGKILL or a power cut does not:
+        children are spawned with start_new_session=True and simply keep running.
+        The next runner then respawns them, and the survivor holds the port
+        against every restart — the 2026-09-07 cmux-focus-server incident.
+
+        Applies to all timer types. Two of the daemons declare no port at all, so
+        an orphan there runs silently alongside its replacement.
+        """
+        outcomes: List[Dict[str, Any]] = []
+        try:
+            rows = self.state.list_active_runs()
+        except Exception:
+            logger.warning("Orphan reclaim could not read active runs", exc_info=True)
+            return outcomes
+        if not rows:
+            return outcomes
+
+        boot_time = self._boot_time()
+        for row in rows:
+            try:
+                outcomes.append(self._reclaim_one_orphan(row, boot_time))
+            except Exception:
+                # One unreadable row must not stop the runner from starting.
+                logger.warning("Orphan reclaim failed for row %s", row, exc_info=True)
+                outcomes.append({
+                    "run_id": row.get("run_id"),
+                    "timer_id": row.get("timer_id"),
+                    "pid": row.get("pid"),
+                    "action": "error",
+                    "detail": "",
+                })
+        return outcomes
+
+    def _reclaim_one_orphan(
+        self, row: Dict[str, Any], boot_time: Optional[datetime]
+    ) -> Dict[str, Any]:
+        run_id = row.get("run_id")
+        timer_id = row.get("timer_id")
+        pid = row.get("pid")
+
+        def outcome(action: str, detail: str = "") -> Dict[str, Any]:
+            return {"run_id": run_id, "timer_id": timer_id, "pid": pid, "action": action, "detail": detail}
+
+        if not run_id or pid is None:
+            return outcome("no_pid")
+        pid = int(pid)
+
+        started_at = self._parse_iso(row.get("started_at"))
+        if boot_time and started_at and started_at < boot_time:
+            # The machine rebooted since this run started, so nothing of it
+            # survives and the PID now certainly names something else.
+            logger.info("Orphan reclaim skipping run %s (pid %s): started before boot", run_id, pid)
+            return outcome("skipped_pre_boot")
+
+        if not self._pid_alive(pid):
+            return outcome("dead")
+
+        is_ours, evidence = self._identify_orphan(pid, run_id, row.get("pid_started_at"))
+
+        if is_ours is None:
+            self.state.add_incident(
+                "warn",
+                "orphan_unverified",
+                f"PID {pid} from run {run_id} of timer {timer_id} is alive but its identity "
+                f"could not be confirmed ({evidence}); left running",
+                timer_id,
+            )
+            return outcome("unverified", evidence)
+
+        if not is_ours:
+            self.state.add_incident(
+                "warn",
+                "pid_reused",
+                f"PID {pid} recorded for run {run_id} of timer {timer_id} now belongs to "
+                f"another process ({evidence}); left running",
+                timer_id,
+            )
+            return outcome("pid_reused", evidence)
+
+        forced = self._kill_orphan(pid)
+        logger.warning(
+            "Reclaimed orphaned pid %s from timer %s (run %s, forced=%s)",
+            pid, timer_id, run_id, forced,
+        )
+        self.state.add_incident(
+            "warn",
+            "orphan_reclaimed",
+            f"Reclaimed orphaned pid {pid} from timer {timer_id} (run {run_id}) that "
+            f"outlived an unclean runner exit; identified by {evidence}"
+            + ("; required SIGKILL" if forced else ""),
+            timer_id,
+        )
+        return outcome("reclaimed", evidence)
+
     def _is_daemon_process_alive(self, timer_id: str, run_id: Optional[str]) -> bool:
         """Check if the daemon process is actually alive via in-memory dict or OS PID check."""
         with self._run_lock:
@@ -2640,13 +3017,7 @@ end tell'''],
         if run_id:
             pid = self.state.get_active_run_pid(run_id)
             if pid is not None:
-                try:
-                    os.kill(pid, 0)  # signal 0 = existence check
-                    return True
-                except ProcessLookupError:
-                    return False
-                except PermissionError:
-                    return True  # process exists but we can't signal it
+                return self._pid_alive(pid)
             run = self.state.get_run(run_id)
             if run:
                 started_iso = run.get("started_at") or run.get("created_at")

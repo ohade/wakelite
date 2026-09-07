@@ -191,6 +191,7 @@ A list of resource requirements. Each item:
 | `description` | string | no | Human-readable description |
 | `capacity` | int | no | Total available capacity |
 | `estimated_usage` | int | no | How much this timer consumes per run |
+| `port` | int | no | TCP port this timer listens on (1–65535). Before a daemon spawns, the port is checked; a listener left behind by a crashed runner is reclaimed, and a foreign listener blocks the spawn with a `resource_held_by_foreign` incident |
 
 ### `until`
 
