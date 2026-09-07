@@ -11,7 +11,10 @@ TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "launchd"
 USER_TEMPLATE = TEMPLATE_DIR / f"{OWNER}.runner.plist"
 SYSTEM_TEMPLATE = TEMPLATE_DIR / f"{OWNER}.wakereconciler.plist"
 
+WATCHDOG_TEMPLATE = TEMPLATE_DIR / f"{OWNER}.watchdog.plist"
+
 USER_TARGET = Path.home() / "Library" / "LaunchAgents" / f"{OWNER}.runner.plist"
+WATCHDOG_TARGET = Path.home() / "Library" / "LaunchAgents" / f"{OWNER}.watchdog.plist"
 SYSTEM_TARGET = Path(f"/Library/LaunchDaemons/{OWNER}.wakereconciler.plist")
 
 

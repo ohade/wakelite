@@ -727,12 +727,20 @@ class Doctor:
         fix: bool = False,
         quiet: bool = False,
         as_json: bool = False,
+        watchdog: bool = False,
         stream: Optional[Any] = None,
     ) -> int:
         out = stream if stream is not None else sys.stdout
         report = self.report()
         if fix:
             self.fix(report)
+
+        if watchdog:
+            # Stamped only for a scheduled run, never for a human's --fix.
+            # This marker is how a DEAD watchdog becomes visible: its only
+            # failure mode is not running at all, and doctor reports the age of
+            # this value. A manual --fix refreshing it would mask exactly that.
+            self.state.set_meta(META_WATCHDOG_LAST_RUN, self._now().isoformat())
 
         acted = any(
             action.get("status") in ("kicked", "failed", "escalated", "reclaimed")
@@ -834,6 +842,15 @@ def render(report: Dict[str, Any]) -> str:
 
 
 def run_doctor(
-    *, fix: bool = False, quiet: bool = False, as_json: bool = False
+    *,
+    fix: bool = False,
+    quiet: bool = False,
+    as_json: bool = False,
+    watchdog: bool = False,
 ) -> int:
-    return Doctor().run(fix=fix, quiet=quiet, as_json=as_json)
+    # --watchdog is the scheduled entrypoint: it implies --fix and --quiet, so
+    # the LaunchAgent and a human invoke the same code path with one flag.
+    if watchdog:
+        fix = True
+        quiet = True
+    return Doctor().run(fix=fix, quiet=quiet, as_json=as_json, watchdog=watchdog)

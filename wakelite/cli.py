@@ -71,7 +71,11 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     # through _api_call.
     from .doctor import run_doctor
 
-    raise SystemExit(run_doctor(fix=args.fix, quiet=args.quiet, as_json=args.json))
+    raise SystemExit(
+        run_doctor(
+            fix=args.fix, quiet=args.quiet, as_json=args.json, watchdog=args.watchdog
+        )
+    )
 
 
 def _cmd_timer_list(args: argparse.Namespace) -> None:
@@ -386,6 +390,11 @@ def main() -> None:
         help="print nothing when healthy and nothing was fixed",
     )
     doctor.add_argument("--json", action="store_true", help="emit the raw report as JSON")
+    doctor.add_argument(
+        "--watchdog",
+        action="store_true",
+        help="scheduled mode: implies --fix --quiet and records that the watchdog ran",
+    )
 
     timer = sub.add_parser("timer", help="timer operations")
     timer_sub = timer.add_subparsers(dest="timer_cmd", required=True)

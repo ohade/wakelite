@@ -4863,6 +4863,112 @@ class ShutdownParallelTerminationTests(unittest.TestCase):
                 self.assertIsNotNone(proc.poll(), f"child {i} survived stop()")
 
 
+class WatchdogTests(unittest.TestCase):
+    """R7. Nothing supervises the supervisor.
+
+    launchd KeepAlive restarts the runner only when the process exits. A runner
+    that is alive but not turning its loop — the case the heartbeat exists to
+    expose — is invisible to it, and no code reads the heartbeat and acts.
+
+    The watchdog is a separate LaunchAgent running `wakelitectl doctor
+    --watchdog`, so the human path and the scheduled path are the same code. It
+    must come after R5: a kick's own teardown manufactures orphans faster than
+    `doctor --fix` reclaims them when launchd's exit budget is 5s.
+    """
+
+    def _load_doctor(self):
+        import wakelite.doctor as doctor_module
+
+        importlib.reload(doctor_module)
+        return doctor_module
+
+    def test_watchdog_run_records_when_it_last_ran(self):
+        """Otherwise doctor's own watchdog line reads 'no record' forever.
+
+        A watchdog whose only failure mode is "did not run" needs that failure
+        to be visible; an indicator that is never written cannot show it.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+            svc.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
+
+            doc = doctor_module.Doctor(
+                db_path=svc.state.db_path,
+                api_get=lambda path: None,
+                process_snapshot=lambda: [],
+                port_holders=lambda port: [],
+                launchctl=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+                orphan_reclaim=lambda state: [],
+                uid=501,
+            )
+            self.assertIsNone(
+                svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN),
+                "precondition: nothing has stamped the marker yet",
+            )
+
+            doc.run(fix=True, quiet=True, watchdog=True)
+
+            stamped = svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN)
+            self.assertIsNotNone(
+                stamped,
+                "a watchdog run left no record, so doctor can never report that the "
+                "watchdog stopped running",
+            )
+
+    def test_manual_fix_does_not_masquerade_as_a_watchdog_run(self):
+        """A human running --fix must not reset the staleness indicator."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+            svc.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
+
+            doc = doctor_module.Doctor(
+                db_path=svc.state.db_path,
+                api_get=lambda path: None,
+                process_snapshot=lambda: [],
+                port_holders=lambda port: [],
+                launchctl=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+                orphan_reclaim=lambda state: [],
+                uid=501,
+            )
+            doc.run(fix=True, quiet=True)
+
+            self.assertIsNone(
+                svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN),
+                "a manual --fix stamped the watchdog marker, hiding a dead watchdog",
+            )
+
+    def test_watchdog_plist_template_is_installable_and_calls_doctor(self):
+        import plistlib
+
+        from wakelite import launchd_install
+
+        template = Path(launchd_install.WATCHDOG_TEMPLATE)
+        self.assertTrue(template.exists(), f"no watchdog template at {template}")
+
+        parsed = plistlib.loads(template.read_bytes())
+        self.assertEqual(parsed.get("Label"), "com.wakelite.watchdog")
+
+        interval = parsed.get("StartInterval")
+        self.assertIsNotNone(interval, "watchdog plist has no StartInterval, so it runs once")
+        self.assertLessEqual(
+            interval, 600,
+            f"StartInterval {interval}s is longer than the 5min kick cooldown, so a "
+            "hung runner would wait longer than necessary",
+        )
+
+        argv = parsed.get("ProgramArguments") or []
+        self.assertTrue(
+            any("doctor" in str(a) for a in argv) and any("--watchdog" in str(a) for a in argv),
+            f"watchdog plist does not invoke `doctor --watchdog`: {argv}",
+        )
+        # RunAtLoad would fire a kick during every login and every reinstall.
+        self.assertFalse(parsed.get("RunAtLoad", False), "watchdog must not kick at load")
+
+
 
 if __name__ == "__main__":
     unittest.main()
