@@ -259,10 +259,24 @@ class WakeLiteService:
             self._scheduler_thread.join(timeout=5)
         # Terminate all active processes (daemon and regular). Mark each run first
         # so the run thread reports "shutdown" rather than a spurious failure.
+        #
+        # Concurrently, because _terminate_process waits a full grace period for
+        # each child before escalating to SIGKILL. Sequentially that is
+        # len(children) * grace, and launchd SIGKILLs the runner once ExitTimeOut
+        # expires — killing it mid-teardown orphans every child not yet reached
+        # (start_new_session=True), which manufactures the orphans R1 reclaims.
+        # One grace period total keeps teardown inside the timeout.
         with self._run_lock:
-            for run_id, proc in list(self._active_processes.items()):
+            pending = list(self._active_processes.items())
+            for run_id, _ in pending:
                 self._shutdown_terminated.add(run_id)
-                self._terminate_process(proc)
+
+        if pending:
+            with ThreadPoolExecutor(
+                max_workers=len(pending), thread_name_prefix="wl-stop"
+            ) as stopper:
+                list(stopper.map(lambda item: self._terminate_process(item[1]), pending))
+
         self._executor.shutdown(wait=True, cancel_futures=True)
 
     def health(self) -> Dict[str, Any]:

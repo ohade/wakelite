@@ -4791,6 +4791,78 @@ class ReclaimHookContractTests(unittest.TestCase):
             )
 
 
+class RunnerPlistExitTimeoutTests(unittest.TestCase):
+    """The installed runner must get longer than launchd's 5s default to stop.
+
+    Measured on this machine before the change: `launchctl print
+    gui/<uid>/com.wakelite.runner` reported `exit timeout = 5`. stop()
+    joins the scheduler for up to 5s and only then terminates children, so a
+    5s budget can expire mid-teardown. launchd then SIGKILLs the runner and its
+    children are orphaned, which is what R1 has to clean up afterwards.
+    """
+
+    def test_template_declares_a_sufficient_exit_timeout(self):
+        import plistlib
+
+        template = Path(__file__).resolve().parents[1] / "launchd" / "com.wakelite.runner.plist"
+        parsed = plistlib.loads(template.read_bytes())
+        timeout = parsed.get("ExitTimeOut")
+        self.assertIsNotNone(
+            timeout,
+            "runner plist declares no ExitTimeOut, so launchd applies its 5s default "
+            "and can SIGKILL the runner mid-teardown",
+        )
+        self.assertGreaterEqual(
+            timeout, 30,
+            f"ExitTimeOut {timeout}s leaves too little room: stop() may spend 5s joining "
+            "the scheduler before it even begins terminating children",
+        )
+
+
+class ShutdownParallelTerminationTests(unittest.TestCase):
+    """stop() must bound teardown by one grace period, not by child count.
+
+    launchd gives the runner a fixed ExitTimeOut and SIGKILLs it when that
+    expires. stop() terminated children one at a time, each with its own 5s
+    grace, so N stubborn children needed N*5s. Past the timeout launchd kills
+    the runner mid-teardown and the remaining children are orphaned
+    (start_new_session=True) — manufacturing exactly the orphans R1 exists to
+    reclaim, on every restart.
+    """
+
+    def test_stop_terminates_stubborn_children_concurrently(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+
+            procs = []
+            for _ in range(3):
+                # Ignores SIGTERM, so each child costs a full grace period.
+                proc = subprocess.Popen(
+                    ["/bin/sh", "-c", 'trap "" TERM; sleep 60'],
+                    start_new_session=True,
+                )
+                procs.append(proc)
+                self.addCleanup(proc.wait)
+                self.addCleanup(proc.kill)
+
+            for i, proc in enumerate(procs):
+                svc._active_processes[f"run-{i}"] = proc
+
+            started = time.monotonic()
+            svc.stop()
+            elapsed = time.monotonic() - started
+
+            grace = 5.0
+            self.assertLess(
+                elapsed, grace * 2,
+                f"stop() took {elapsed:.1f}s for 3 stubborn children; sequential "
+                f"termination costs about {grace * 3:.0f}s, concurrent about {grace:.0f}s",
+            )
+            for i, proc in enumerate(procs):
+                self.assertIsNotNone(proc.poll(), f"child {i} survived stop()")
+
+
 
 if __name__ == "__main__":
     unittest.main()
