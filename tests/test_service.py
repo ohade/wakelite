@@ -1,7 +1,10 @@
 import importlib
 import json
 import os
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -3594,6 +3597,305 @@ class DaemonSpawnStallTests(unittest.TestCase):
                 if proc is not None:
                     proc.terminate()
                 worker.join(timeout=10)
+
+
+# Runs in a throwaway interpreter that the test then SIGKILLs, which is the only
+# faithful way to produce the orphan: a child spawned through the real
+# _run_occurrence env-injection path whose runner died without calling stop().
+_ORPHAN_SPAWNER_SOURCE = '''\
+import json
+import os
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+
+home = sys.argv[1]
+os.environ["HOME"] = home
+os.environ["WAKELITE_HOME"] = home
+
+from wakelite.service import WakeLiteService
+
+svc = WakeLiteService(tick_seconds=15)
+timer = svc.timer_store.create_timer({
+    "name": "daemon-orphan-survivor",
+    "comment": "Daemon child that outlives a SIGKILLed runner",
+    "enabled": True,
+    "timer_type": "daemon",
+    "recurrence": {"frequency": "interval", "every": "0s"},
+    "command": {"mode": "shell", "shell": "exec sleep 300"},
+    "notifications": {"slackActivity": False},
+})
+scheduled_at = datetime.now(timezone.utc).isoformat()
+svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+threading.Thread(
+    target=svc._run_occurrence,
+    args=(timer, scheduled_at, False, "daemon_start", None),
+    daemon=True,
+).start()
+
+row = None
+deadline = time.time() + 30
+while time.time() < deadline:
+    rows = svc.state.get_active_runs_for_timer(timer["id"])
+    if rows and rows[0].get("pid"):
+        row = rows[0]
+        break
+    time.sleep(0.05)
+
+marker = os.path.join(home, "orphan.json.tmp")
+with open(marker, "w") as fh:
+    json.dump(row, fh)
+os.rename(marker, os.path.join(home, "orphan.json"))
+
+time.sleep(600)
+'''
+
+
+class OrphanReclaimTests(unittest.TestCase):
+    """Startup reclaim of children that outlived an unclean runner exit.
+
+    Regression for 2026-09-07: commit 9754fbd closed the in-process spawn race,
+    but a SIGKILLed or power-cut runner still leaves its children running
+    (start_new_session=True). Nothing reclaimed them, so the old process kept
+    the daemon's port and every restart failed with EADDRINUSE.
+    """
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _kill_pid(self, pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _spawn_foreign_sleep(self) -> subprocess.Popen:
+        proc = subprocess.Popen(["/bin/sleep", "120"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(self._kill_pid, proc.pid)
+        return proc
+
+    def test_child_of_sigkilled_runner_is_reclaimed_on_next_start(self):
+        repo_root = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as td:
+            spawner_env = os.environ.copy()
+            spawner_env["PYTHONPATH"] = repo_root
+            spawner_env["HOME"] = td
+            spawner_env["WAKELITE_HOME"] = td
+            spawner_log = Path(td) / "spawner.log"
+            marker = Path(td) / "orphan.json"
+
+            with spawner_log.open("wb") as log:
+                spawner = subprocess.Popen(
+                    [sys.executable, "-c", _ORPHAN_SPAWNER_SOURCE, td],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=spawner_env,
+                )
+            self.addCleanup(spawner.wait)
+            self.addCleanup(self._kill_pid, spawner.pid)
+
+            deadline = time.time() + 60
+            while time.time() < deadline and not marker.exists():
+                if spawner.poll() is not None:
+                    self.fail(f"spawner exited early:\n{spawner_log.read_text()}")
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), f"spawner never spawned a child:\n{spawner_log.read_text()}")
+
+            row = json.loads(marker.read_text())
+            self.assertIsNotNone(row, "spawner recorded no active_runs row")
+            pid = int(row["pid"])
+            timer_id = row["timer_id"]
+            self.addCleanup(self._kill_pid, pid)
+
+            # SIGKILL: the runner dies with no chance to run stop().
+            spawner.kill()
+            spawner.wait(timeout=10)
+            self.assertTrue(self._pid_alive(pid), "the child should outlive the killed runner")
+
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            try:
+                with patch.object(svc, "_enqueue_or_spawn"), patch.object(svc, "_scheduler_loop"):
+                    svc.start()
+
+                deadline = time.time() + 10
+                while time.time() < deadline and self._pid_alive(pid):
+                    time.sleep(0.05)
+                self.assertFalse(
+                    self._pid_alive(pid),
+                    f"orphaned pid {pid} still running after startup reclaim",
+                )
+
+                reclaimed = [
+                    inc for inc in svc.state.list_incidents(limit=200)
+                    if inc["type"] == "orphan_reclaimed"
+                ]
+                self.assertEqual(len(reclaimed), 1, f"expected one orphan_reclaimed incident, got {reclaimed}")
+                self.assertIn(str(pid), reclaimed[0]["message"])
+                self.assertEqual(reclaimed[0]["timer_id"], timer_id)
+            finally:
+                svc.stop()
+
+    def test_live_pid_that_is_not_ours_is_left_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("orphan-pid-reuse"))
+            timer_id = timer["id"]
+            foreign = self._spawn_foreign_sleep()
+
+            run_id = "run-recycled-pid"
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.set_runtime_running(timer_id, run_id, scheduled_at)
+            # A PID recycled after the crash: the number matches, the process
+            # behind it does not.
+            svc.state.update_active_run_pid(run_id, foreign.pid, "Thu Jan  1 00:00:00 1970")
+
+            outcomes = svc._reclaim_orphaned_processes()
+
+            self.assertEqual([o["action"] for o in outcomes], ["pid_reused"], f"outcomes={outcomes}")
+            self.assertEqual(outcomes[0]["pid"], foreign.pid)
+            self.assertTrue(self._pid_alive(foreign.pid), "a foreign process must never be signalled")
+            self.assertIsNone(foreign.poll())
+
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertIn("pid_reused", types)
+            self.assertNotIn("orphan_reclaimed", types)
+
+    def test_row_older_than_boot_time_is_skipped_without_signalling(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("orphan-pre-boot"))
+            timer_id = timer["id"]
+            survivor = self._spawn_foreign_sleep()
+
+            run_id = "run-from-a-previous-boot"
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.set_runtime_running(timer_id, run_id, scheduled_at)
+            svc.state.update_active_run_pid(run_id, survivor.pid, "Thu Jan  1 00:00:00 1970")
+            svc.state._connect().execute(
+                "UPDATE active_runs SET started_at = ? WHERE run_id = ?",
+                ("2001-01-01T00:00:00+00:00", run_id),
+            )
+
+            outcomes = svc._reclaim_orphaned_processes()
+
+            self.assertEqual([o["action"] for o in outcomes], ["skipped_pre_boot"], f"outcomes={outcomes}")
+            self.assertTrue(self._pid_alive(survivor.pid))
+            self.assertIsNone(survivor.poll())
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertNotIn("orphan_reclaimed", types)
+            self.assertNotIn("pid_reused", types)
+
+
+_FOREIGN_LISTENER_SOURCE = '''\
+import socket
+import sys
+import time
+
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", 0))
+sock.listen(5)
+print(sock.getsockname()[1], flush=True)
+time.sleep(600)
+'''
+
+
+class DeclaredPortTests(unittest.TestCase):
+    """resources[].port: clear the port before a daemon spawns, or refuse to spawn."""
+
+    def _start_foreign_listener(self) -> int:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _FOREIGN_LISTENER_SOURCE],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        port = int(proc.stdout.readline().strip())
+        return port
+
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    @staticmethod
+    def _port_daemon(name: str, port: int, shell: str = "sleep 30"):
+        return {
+            "name": name,
+            "comment": "Daemon that owns a TCP port",
+            "enabled": True,
+            "timer_type": "daemon",
+            "recurrence": {"frequency": "interval", "every": "0s"},
+            "command": {"mode": "shell", "shell": shell},
+            "resources": [{"name": "listen-port", "port": port}],
+        }
+
+    def test_port_key_is_accepted_and_range_checked(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(self._port_daemon("port-ok", 17382))
+            self.assertEqual(timer["resources"][0]["port"], 17382)
+
+            with self.assertRaises(ValueError) as ctx:
+                svc.timer_store.create_timer(self._port_daemon("port-bad", 70000))
+            self.assertIn("port must be an integer between 1 and 65535", str(ctx.exception))
+
+    def test_daemon_does_not_spawn_when_its_port_is_held_by_a_stranger(self):
+        port = self._start_foreign_listener()
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(self._port_daemon("port-blocked", port))
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._run_occurrence(timer, scheduled_at, False, "daemon_start", None)
+
+            run = svc.state.list_runs(limit=5, timer_id=timer_id)[0]
+            self.assertEqual(run["status"], "failed")
+            self.assertIn(f"port {port} is held by foreign pid", run["message"])
+            self.assertEqual(svc._active_processes, {})
+
+            incidents = [
+                inc for inc in svc.state.list_incidents(limit=200)
+                if inc["type"] == "resource_held_by_foreign"
+            ]
+            self.assertEqual(len(incidents), 1, f"expected one incident, got {incidents}")
+            self.assertEqual(incidents[0]["timer_id"], timer_id)
+
+    def test_daemon_with_a_free_declared_port_spawns_normally(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                self._port_daemon("port-free", self._free_port(), shell="true")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._run_occurrence(timer, scheduled_at, False, "daemon_start", None)
+
+            run = svc.state.list_runs(limit=5, timer_id=timer_id)[0]
+            self.assertEqual(run["status"], "success", run["message"])
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertNotIn("resource_held_by_foreign", types)
 
 
 if __name__ == "__main__":

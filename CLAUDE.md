@@ -173,6 +173,40 @@ fall back to defaults):
 Bucket arithmetic uses `.timestamp()` on datetimes so DST transitions
 don't skew the 7-day axis.
 
+## Orphan reclaim (startup)
+
+Children are spawned with `start_new_session=True`, so a SIGKILLed or power-cut
+runner leaves them running. `start()` calls `_reclaim_orphaned_processes()`
+**before** the recovery loop, because `set_runtime_idle(timer_id)` with no
+`run_id` deletes the `active_runs` rows that hold the PIDs.
+
+Each row is (1) skipped if `started_at` predates `sysctl -n kern.boottime`,
+(2) skipped if the PID is gone, (3) identity-checked, then SIGTERM → 5s →
+SIGKILL, recording an `orphan_reclaimed` incident. A live PID that fails the
+identity check is left alone with a `pid_reused` incident; one that cannot be
+judged gets `orphan_unverified` and is also left alone.
+
+**Identity is process start time, not the command line and not the environment.**
+
+- Command line does not work: the timer runs `exec /opt/homebrew/bin/python3
+  <script>` but the live process reports argv[0] as
+  `/opt/homebrew/Cellar/python@3.14/.../Python`.
+- Environment does not work on macOS 26: `ps -E` (and `KERN_PROCARGS2` directly)
+  return only argv for a non-root caller, even for your own child. Measured on
+  26.5.1 build 25F80. `WAKELITE_RUN_ID` / `WAKELITE_TIMER_ID` are still injected
+  into every child and still checked first — they carry the check if the runner
+  ever runs as root, and on Linux where `/proc/<pid>/environ` is readable.
+- So `active_runs.pid_started_at` records `ps -o lstart=` at spawn, and reclaim
+  compares it. A recycled PID has a different start time. Rows written before
+  this column existed have no start time, so their processes are left alone.
+
+`resources[].port` is optional and opt-in. A daemon that declares one gets a
+`socket.bind` probe before spawn; the holder is found with `lsof` and reclaimed
+if it is ours (env marker, or an open fd on this timer's run log — the proof
+that survives the `active_runs` row being deleted). A foreign holder blocks the
+spawn with a `resource_held_by_foreign` incident instead of burning the restart
+budget on EADDRINUSE.
+
 ## Key gotchas
 
 - **Shell-mode timers run under `/bin/zsh -lc`; `status` is a read-only zsh special parameter.** Never write `status=$(...)` in a timer command; use a specific name such as `build_status`. Observed 2026-08-02: a long-lived polling timer repeatedly failed with `zsh: read-only variable: status` before reaching its polling logic.

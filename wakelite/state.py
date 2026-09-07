@@ -177,11 +177,16 @@ class StateStore:
                     UNIQUE(timer_id, type)
                 );
 
+                -- pid_started_at is the OS-reported start time of the process
+                -- behind `pid`. It is the identity proof used by orphan reclaim
+                -- after an unclean runner exit: a recycled PID belongs to a
+                -- process with a different start time.
                 CREATE TABLE IF NOT EXISTS active_runs (
                     run_id TEXT PRIMARY KEY,
                     timer_id TEXT NOT NULL,
                     started_at TEXT NOT NULL,
-                    pid INTEGER
+                    pid INTEGER,
+                    pid_started_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_active_runs_timer
                 ON active_runs(timer_id);
@@ -210,6 +215,9 @@ class StateStore:
             inc_cols = [row["name"] for row in conn.execute("PRAGMA table_info(incidents)").fetchall()]
             if "ack_source" not in inc_cols:
                 conn.execute("ALTER TABLE incidents ADD COLUMN ack_source TEXT")
+            ar_cols = [row["name"] for row in conn.execute("PRAGMA table_info(active_runs)").fetchall()]
+            if "pid_started_at" not in ar_cols:
+                conn.execute("ALTER TABLE active_runs ADD COLUMN pid_started_at TEXT")
 
     @staticmethod
     def _now() -> str:
@@ -362,16 +370,27 @@ class StateStore:
                 running_count=int(row["running_count"]) if row["running_count"] else 0,
             )
 
-    def update_active_run_pid(self, run_id: str, pid: int) -> None:
+    def update_active_run_pid(self, run_id: str, pid: int, pid_started_at: Optional[str] = None) -> None:
         with self._lock:
             conn = self._connect()
-            conn.execute("UPDATE active_runs SET pid = ? WHERE run_id = ?", (pid, run_id))
+            conn.execute(
+                "UPDATE active_runs SET pid = ?, pid_started_at = ? WHERE run_id = ?",
+                (pid, pid_started_at, run_id),
+            )
 
     def get_active_run_pid(self, run_id: str) -> Optional[int]:
         with self._lock:
             conn = self._connect()
             row = conn.execute("SELECT pid FROM active_runs WHERE run_id = ?", (run_id,)).fetchone()
             return int(row["pid"]) if row and row["pid"] is not None else None
+
+    def list_active_runs(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT run_id, timer_id, started_at, pid, pid_started_at FROM active_runs ORDER BY started_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def get_active_runs_for_timer(self, timer_id: str) -> list:
         with self._lock:
