@@ -4695,5 +4695,37 @@ class DaemonFlapBreakerTests(unittest.TestCase):
             )
 
 
+class ReclaimHookContractTests(unittest.TestCase):
+    """R6's doctor and R1's reclaim must actually connect.
+
+    doctor._resolve_orphan_reclaim() looks the entrypoint up by name on the
+    module — `wakelite.service.reclaim_orphans(state)` — so that doctor works
+    standalone and picks R1 up the moment it merges. R1 landed its reclaim as
+    private methods on the service class instead, so the lookup returns None
+    and `doctor --fix` action 1 reports "not present in this build" forever.
+
+    It fails quietly, which is why this test exists: nothing else surfaces it.
+    R7's watchdog runs `doctor --fix` on a schedule, so an inert action 1 means
+    the watchdog kicks a stale runner and never reclaims the orphans the kick
+    creates — the exact failure R1 and R5 exist to prevent.
+
+    Written by the conductor after merging the four branches. The fix is a
+    design call for the plan owner: either expose a module-level
+    reclaim_orphans(state) wrapper, or change doctor's resolution to the bound
+    method and update its three references. Note the signatures differ too.
+    """
+
+    def test_doctor_can_resolve_the_reclaim_entrypoint(self):
+        from wakelite import doctor
+
+        hook = doctor._resolve_orphan_reclaim()
+        self.assertIsNotNone(
+            hook,
+            "doctor cannot find wakelite.service.reclaim_orphans, so `doctor --fix` "
+            "will never invoke R1's orphan reclaim",
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
