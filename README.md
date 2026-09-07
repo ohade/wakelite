@@ -55,6 +55,29 @@ PYTHONPATH=. ./bin/wakelitectl mcp install --targets claude,codex
 
 Namespace: `wakelite.v1.*` — see [`docs/API.md`](docs/API.md) for the full tool list.
 
+## Diagnose (`doctor`)
+
+```bash
+PYTHONPATH=. ./bin/wakelitectl doctor          # heartbeat, daemons, ports, failing timers, incidents
+PYTHONPATH=. ./bin/wakelitectl doctor --json   # same report, machine-readable
+PYTHONPATH=. ./bin/wakelitectl doctor --fix    # reclaim orphans; kickstart a stale runner
+PYTHONPATH=. ./bin/wakelitectl doctor --quiet  # silent when healthy — safe to run on a schedule
+```
+
+Unlike every other subcommand, `doctor` falls back to reading `~/.wakelite/state.db`
+directly when the REST API does not answer, because a hung runner is exactly the
+case where the API stops answering. Exit code is `0` when healthy, `1` when the
+report lists problems.
+
+`--fix` does exactly two things and records an incident for each: reclaim orphaned
+daemon children, and `launchctl kickstart -k` the runner when the heartbeat is stale.
+The kick is capped at one per 30 minutes; after two kicks in two hours fail to
+restore the heartbeat it raises one critical incident and stops kicking.
+
+To have `doctor` check a daemon's port, declare it as a resource named
+`port:17382`, or name the resource anything containing "port" and put the number
+in its description.
+
 ## Features
 
 - **Timer types**: Scheduled (one-shot on recurrence) and Daemon (long-lived, kept alive)
@@ -74,6 +97,9 @@ Namespace: `wakelite.v1.*` — see [`docs/API.md`](docs/API.md) for the full too
 - **MCP integration**: full Claude/Codex tool namespace for AI-driven scheduling
 - **Idempotency**: every create/update/delete requires a caller-chosen key — if the same key is sent twice within 24 hours, the second call returns the original result instead of duplicating the action
 - **Crash recovery**: missed-run catch-up, uncertain-run marking, at-least-once delivery
+- **`doctor`**: one read-only command for runner heartbeat, daemon liveness and
+  parentage, port ownership, failure streaks and open incidents — reads the state
+  database directly so it still answers when the runner is hung
 - **Zero dependencies**: Python stdlib only (optional: `rumps` for menu bar app)
 
 ## Installation

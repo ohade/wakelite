@@ -755,6 +755,10 @@ class WakeLiteService:
         prune_counter = 0
         consecutive_errors = 0
 
+        # Recorded once, not per tick: `doctor` reads it to tell a daemon that
+        # is a child of the live runner from one orphaned by an earlier one.
+        self.state.set_meta("runner.pid", str(os.getpid()))
+
         while not self._stop.is_set():
             try:
                 self._wake_event.clear()
