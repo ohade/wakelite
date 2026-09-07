@@ -17,6 +17,7 @@ PYTHONPATH=. python -m pytest tests/test_recurrence.py -v
 
 # CLI commands (always need PYTHONPATH)
 PYTHONPATH=. ./bin/wakelitectl health
+PYTHONPATH=. ./bin/wakelitectl doctor # first command to run when something is wrong
 PYTHONPATH=. ./bin/wakelitectl timer list
 PYTHONPATH=. ./bin/wakelitectl launchd restart    # restart runner after code changes (purges __pycache__)
 ```
@@ -57,6 +58,7 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `http_api.py` | REST API handler + embedded web UI (single-file HTML/CSS/JS in Python string) |
 | `mcp_server.py` | MCP protocol bridge — translates MCP tool calls to REST API calls |
 | `reconciler.py` | Reads timer wake intents, reconciles with `pmset schedule` entries |
+| `doctor.py` | `wakelitectl doctor` — read-only diagnosis of heartbeat, daemons, ports, failure streaks, incidents. The only client that bypasses REST: it falls back to opening `state.db` directly, because a hung runner is exactly when the API stops answering. `--fix` does two bounded things (orphan reclaim, rate-limited `launchctl kickstart`) and records an incident for each |
 
 ### Data storage
 

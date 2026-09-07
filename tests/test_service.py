@@ -4098,5 +4098,284 @@ class DeclaredPortTests(unittest.TestCase):
             self.assertNotIn("resource_held_by_foreign", types)
 
 
+class DoctorTests(unittest.TestCase):
+    """`wakelitectl doctor` — the one command that says what is wrong.
+
+    The case that matters most is a hung runner: the REST API is exactly the
+    thing that stops answering, so every fact in the report has to be
+    reachable from state.db on its own.
+    """
+
+    def _load_doctor(self):
+        import wakelite.doctor as doctor_module
+
+        importlib.reload(doctor_module)
+        return doctor_module
+
+    def _clock(self, start):
+        holder = {"now": start}
+        return holder, (lambda: holder["now"])
+
+    def _doctor(self, doctor_module, svc, **overrides):
+        kwargs = {
+            "db_path": svc.state.db_path,
+            "api_get": lambda path: None,
+            "process_snapshot": lambda: [],
+            "port_holders": lambda port: [],
+            "launchctl": lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+            "orphan_reclaim": lambda state: [],
+            "uid": 501,
+        }
+        kwargs.update(overrides)
+        return doctor_module.Doctor(**kwargs)
+
+    def test_heartbeat_age_decides_healthy_versus_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            fresh = (now - timedelta(seconds=10)).isoformat()
+            stale = (now - timedelta(seconds=400)).isoformat()
+
+            def api_get_with(heartbeat):
+                return lambda path: {"runner_heartbeat": heartbeat} if path == "/v1/health" else {"timers": []}
+
+            healthy = self._doctor(
+                doctor_module, svc, api_get=api_get_with(fresh), now=lambda: now
+            ).report()
+            self.assertEqual(healthy["runner"]["status"], "healthy")
+            self.assertEqual(healthy["source"], "api")
+            self.assertAlmostEqual(healthy["runner"]["heartbeat_age_seconds"], 10.0, places=1)
+            self.assertEqual(healthy["problems"], [])
+
+            stalled = self._doctor(
+                doctor_module, svc, api_get=api_get_with(stale), now=lambda: now
+            ).report()
+            self.assertEqual(stalled["runner"]["status"], "stale")
+            self.assertAlmostEqual(stalled["runner"]["heartbeat_age_seconds"], 400.0, places=1)
+            self.assertTrue(
+                any("heartbeat" in problem for problem in stalled["problems"]),
+                stalled["problems"],
+            )
+
+    def test_report_is_complete_when_the_rest_api_is_unreachable(self):
+        """The hung-runner case: REST is dead, so every fact comes from state.db."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            svc.state.set_meta("runner.heartbeat", (now - timedelta(seconds=600)).isoformat())
+            svc.state.set_meta("watchdog.last_run", (now - timedelta(minutes=20)).isoformat())
+
+            daemon = svc.timer_store.create_timer({
+                "name": "focus-server",
+                "comment": "Daemon holding a TCP port",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "python3 -m focus.server --port 17382"},
+                "resources": [{"name": "focus-port", "description": "listens on 127.0.0.1:17382"}],
+            })
+            svc.state.set_runtime_running(daemon["id"], "run-dead", "2026-09-07T11:00:00+00:00", pid=999999)
+
+            # Real shape of cmux-focus-server: a resource that names a port
+            # and records the number nowhere.
+            mute = svc.timer_store.create_timer({
+                "name": "focus-server-portless",
+                "comment": "Declares a port resource with no number",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "exec /opt/homebrew/bin/python3 server.py"},
+                "resources": [{"name": "cmux-focus-port", "description": "the focus socket"}],
+            })
+
+            poller = svc.timer_store.create_timer(_basic_timer("build-poller", shell="exit 1"))
+            stderr_path = Path(td) / "poller.err.log"
+            stderr_path.write_text("zsh: read-only variable: status\n", encoding="utf-8")
+            for index in range(3):
+                scheduled_at = f"2026-09-07T10:0{index}:00+00:00"
+                run = svc.state.create_run(
+                    timer_id=poller["id"],
+                    timer_name=poller["name"],
+                    scheduled_at=scheduled_at,
+                    is_catchup=False,
+                    queued_reason=None,
+                )
+                svc.state.finish_run(
+                    run_id=run["run_id"],
+                    timer_id=poller["id"],
+                    scheduled_at=scheduled_at,
+                    status="failed",
+                    exit_code=1,
+                    message="exit code 1",
+                    stdout_path=None,
+                    stderr_path=str(stderr_path),
+                )
+
+            svc.state.add_incident("error", "run_failed", "boom", poller["id"])
+            svc.state.add_incident("error", "run_failed", "boom again", poller["id"])
+            svc.state.add_incident("warn", "crash_recovery", "recovered", daemon["id"])
+
+            def unreachable(path):
+                raise RuntimeError("WakeLite service unavailable")
+
+            report = self._doctor(
+                doctor_module,
+                svc,
+                api_get=unreachable,
+                port_holders=lambda port: [9931] if port == 17382 else [],
+                now=lambda: now,
+            ).report()
+
+            self.assertEqual(report["source"], "database")
+            self.assertEqual(report["runner"]["status"], "stale")
+
+            daemons = {d["timer_id"]: d for d in report["daemons"]}
+            self.assertIn(daemon["id"], daemons)
+            self.assertFalse(daemons[daemon["id"]]["alive"])
+
+            ports = {p["port"]: p for p in report["ports"]}
+            self.assertEqual(
+                sorted(ports),
+                [17382],
+                "an octet of 127.0.0.1 must not be mistaken for a declared port",
+            )
+            self.assertEqual(ports[17382]["holders"], [9931])
+            self.assertFalse(ports[17382]["ours"])
+
+            hints = {h["timer_id"]: h for h in report["port_hints"]}
+            self.assertEqual(hints[mute["id"]]["resource"], "cmux-focus-port")
+            self.assertNotIn(daemon["id"], hints, "a parsed port must not also raise a hint")
+
+            failing = {f["timer_id"]: f for f in report["failing_timers"]}
+            self.assertIn(poller["id"], failing)
+            self.assertEqual(failing[poller["id"]]["streak"], 3)
+            self.assertEqual(
+                failing[poller["id"]]["last_stderr_line"],
+                "zsh: read-only variable: status",
+            )
+
+            self.assertEqual(report["incidents"]["unacked_total"], 3)
+            self.assertEqual(report["incidents"]["by_type"]["run_failed"], 2)
+            self.assertEqual(report["watchdog"]["last_run"][:16], (now - timedelta(minutes=20)).isoformat()[:16])
+
+    def test_fix_kicks_a_stale_runner_once_per_thirty_minutes(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            clock, now = self._clock(datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc))
+            svc.state.set_meta("runner.heartbeat", (clock["now"] - timedelta(seconds=600)).isoformat())
+
+            calls = []
+
+            def fake_launchctl(argv):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            doc = self._doctor(doctor_module, svc, launchctl=fake_launchctl, now=now)
+
+            first = doc.fix(doc.report())
+            kicks = [a for a in first if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["kicked"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                calls[0],
+                ["launchctl", "kickstart", "-k", "gui/501/com.wakelite.runner"],
+            )
+
+            clock["now"] += timedelta(minutes=5)
+            second = doc.fix(doc.report())
+            kicks = [a for a in second if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["skipped"])
+            self.assertEqual(len(calls), 1, "a second kick inside the cooldown must not run")
+
+    def test_two_failed_kicks_in_two_hours_escalate_instead_of_looping(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            clock, now = self._clock(datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc))
+
+            def stale_heartbeat():
+                svc.state.set_meta(
+                    "runner.heartbeat", (clock["now"] - timedelta(seconds=600)).isoformat()
+                )
+
+            calls = []
+
+            def fake_launchctl(argv):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            doc = self._doctor(doctor_module, svc, launchctl=fake_launchctl, now=now)
+
+            stale_heartbeat()
+            doc.fix(doc.report())
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            doc.fix(doc.report())
+            self.assertEqual(len(calls), 2)
+
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            third = doc.fix(doc.report())
+            kicks = [a for a in third if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["escalated"])
+            self.assertEqual(len(calls), 2, "escalation must replace the kick, not follow it")
+
+            critical = svc.state.list_incidents(include_acked=False, severity="critical")
+            self.assertEqual(len(critical), 1, [i["message"] for i in critical])
+            self.assertIn("kick", critical[0]["message"].lower())
+
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            doc.fix(doc.report())
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                len(svc.state.list_incidents(include_acked=False, severity="critical")),
+                1,
+                "escalation must raise one incident, not one per check",
+            )
+
+    def test_quiet_prints_nothing_on_a_healthy_system(self):
+        with tempfile.TemporaryDirectory() as td:
+            import io
+
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            heartbeat = (now - timedelta(seconds=5)).isoformat()
+            # Open incidents are a fact of life on this box (142 of them today).
+            # They are informational, so they must not break the silence.
+            for index in range(3):
+                svc.state.add_incident("warn", "crash_recovery", f"old news {index}")
+
+            doc = self._doctor(
+                doctor_module,
+                svc,
+                api_get=lambda path: {"runner_heartbeat": heartbeat} if path == "/v1/health" else {"timers": []},
+                now=lambda: now,
+            )
+
+            quiet = io.StringIO()
+            exit_code = doc.run(quiet=True, stream=quiet)
+            self.assertEqual(quiet.getvalue(), "")
+            self.assertEqual(exit_code, 0)
+
+            loud = io.StringIO()
+            doc.run(quiet=False, stream=loud)
+            self.assertIn("healthy", loud.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
