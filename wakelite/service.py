@@ -80,6 +80,11 @@ class WakeLiteService:
         # Runs whose process we SIGTERM'd from stop(). Their non-zero exit is a
         # planned shutdown, not a failure — see _run_occurrence's status mapping.
         self._shutdown_terminated: set[str] = set()
+        # Runs whose worker thread has created the run row but has not yet
+        # reached Popen. The pre-spawn Slack calls can stall for tens of seconds
+        # (no DNS right after a machine wake), so the daemon ghost check must
+        # treat these as alive regardless of wall-clock grace.
+        self._spawning_runs: set[str] = set()
 
     _MAX_SLEEP = 15.0  # seconds; caps idle sleep for heartbeat liveness
 
@@ -2191,6 +2196,8 @@ end tell'''],
         )
         run_id = run_ctx["run_id"]
         self.state.set_runtime_running(timer_id, run_id, scheduled_at)
+        with self._run_lock:
+            self._spawning_runs.add(run_id)
 
         notifications = timer.get("notifications") or {}
         slack_activity_enabled = notifications.get("slackActivity", True)
@@ -2260,6 +2267,7 @@ end tell'''],
                     )
                     with self._run_lock:
                         self._active_processes[run_id] = proc
+                        self._spawning_runs.discard(run_id)
                     self.state.update_active_run_pid(run_id, proc.pid)
 
                     exit_code = proc.wait()
@@ -2296,6 +2304,7 @@ end tell'''],
         finally:
             with self._run_lock:
                 self._active_processes.pop(run_id, None)
+                self._spawning_runs.discard(run_id)
                 self._abort_requests.discard(run_id)
                 self._shutdown_terminated.discard(run_id)
 
@@ -2505,6 +2514,9 @@ end tell'''],
 
     def _is_daemon_process_alive(self, timer_id: str, run_id: Optional[str]) -> bool:
         """Check if the daemon process is actually alive via in-memory dict or OS PID check."""
+        with self._run_lock:
+            if run_id and run_id in self._spawning_runs:
+                return True  # worker owns this run and has not reached Popen yet
         if run_id and run_id in self._active_processes:
             proc = self._active_processes[run_id]
             return proc.poll() is None  # None = still running

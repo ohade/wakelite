@@ -3526,5 +3526,75 @@ class CreateFromTemplateTests(unittest.TestCase):
             self.assertIn("Unknown template", str(ctx.exception))
 
 
+class DaemonSpawnStallTests(unittest.TestCase):
+    def test_daemon_run_stalled_before_popen_is_not_declared_ghost(self):
+        """A daemon run whose worker is still blocked before Popen must survive the ghost check.
+
+        Regression for 2026-09-07: after a machine wake, the pre-spawn Slack call
+        stalled ~35s on DNS, the ghost check fired at the 30s grace boundary,
+        cleared the run, and the process that Popen'd 5s later became an untracked
+        orphan holding the daemon's port. Every restart then failed with EADDRINUSE.
+        """
+        import threading
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "daemon-stalled-spawn",
+                "comment": "Worker blocked in Slack before Popen",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 30"},
+            })
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            entered_slack = threading.Event()
+            release_slack = threading.Event()
+
+            def _stalling_daily_thread_ts():
+                entered_slack.set()
+                release_slack.wait(timeout=10)
+                return "fake-thread-ts"
+
+            svc.notifier.get_daily_thread_ts = _stalling_daily_thread_ts
+
+            worker = threading.Thread(
+                target=svc._run_occurrence,
+                args=(timer, scheduled_at, False, "daemon_start", None),
+                daemon=True,
+            )
+            worker.start()
+            try:
+                self.assertTrue(entered_slack.wait(timeout=5), "worker never reached the Slack stall")
+                runtime = svc.state.get_runtime(timer_id)
+                run_id = runtime.running_run_id
+                self.assertTrue(runtime.is_running)
+                self.assertIsNotNone(run_id)
+
+                # Equivalent of "stalled longer than DAEMON_SPAWN_GRACE_SECONDS".
+                with patch.object(svc, "DAEMON_SPAWN_GRACE_SECONDS", 0), \
+                        patch.object(svc, "_spawn_run") as mock_spawn:
+                    svc._process_daemons(datetime.now())
+
+                run = svc.state.get_run(run_id)
+                self.assertEqual(run["status"], "started", f"run was closed early: {run['message']!r}")
+                self.assertTrue(svc.state.get_runtime(timer_id).is_running)
+                self.assertEqual(svc.state.get_runtime(timer_id).running_run_id, run_id)
+                mock_spawn.assert_not_called()
+            finally:
+                release_slack.set()
+                deadline = time.time() + 5
+                while time.time() < deadline and run_id not in svc._active_processes:
+                    time.sleep(0.05)
+                proc = svc._active_processes.get(run_id)
+                if proc is not None:
+                    proc.terminate()
+                worker.join(timeout=10)
+
+
 if __name__ == "__main__":
     unittest.main()
