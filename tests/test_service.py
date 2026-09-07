@@ -1,7 +1,12 @@
 import importlib
 import json
+import logging
 import os
+import re
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -3594,6 +3599,1375 @@ class DaemonSpawnStallTests(unittest.TestCase):
                 if proc is not None:
                     proc.terminate()
                 worker.join(timeout=10)
+
+
+class NetworkSpawnTests(unittest.TestCase):
+    """A slow or absent network must never delay or strand a run.
+
+    Regression for 2026-09-07: the pre-spawn Slack post sat between the run row
+    and Popen. Right after a boot there was no DNS, urlopen's timeout does not
+    bound getaddrinfo, and the call stalled ~35s — pushing Popen past the daemon
+    ghost window and leaving an untracked server holding the port.
+    """
+
+    def _wait_for_run_id(self, svc, timer_id: str, timeout: float = 5.0) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            run_id = svc.state.get_runtime(timer_id).running_run_id
+            if run_id:
+                return run_id
+            time.sleep(0.01)
+        self.fail("run row was never created")
+
+    def _occurrence_status(self, svc, timer_id: str, scheduled_at: str) -> Optional[str]:
+        with svc.state._lock:
+            row = svc.state._connect().execute(
+                "SELECT status FROM occurrences WHERE timer_id = ? AND scheduled_at = ?",
+                (timer_id, scheduled_at),
+            ).fetchone()
+        return row["status"] if row else None
+
+    def test_stalled_slack_does_not_delay_popen(self):
+        """With the notifier stalled 5s, the command still starts within half a second."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-stalled-notifier", shell="sleep 30")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            stall_seconds = 5.0
+            stalling = threading.Event()
+            stalling.set()
+
+            def _stall() -> None:
+                if stalling.is_set():
+                    time.sleep(stall_seconds)
+
+            def _stalling_daily_thread_ts():
+                _stall()
+                return "fake-thread-ts"
+
+            def _stalling_notify_slack(*_args, **_kwargs):
+                _stall()
+                return "fake-ts-1234"
+
+            svc.notifier.get_daily_thread_ts = _stalling_daily_thread_ts
+            svc.notifier.notify_slack = _stalling_notify_slack
+
+            started_at = time.monotonic()
+            worker = threading.Thread(
+                target=svc._run_occurrence,
+                args=(timer, scheduled_at, False, None, None),
+                daemon=True,
+            )
+            worker.start()
+            run_id = None
+            try:
+                deadline = time.monotonic() + stall_seconds + 10
+                spawn_latency = None
+                while time.monotonic() < deadline:
+                    candidate = svc.state.get_runtime(timer_id).running_run_id
+                    if candidate and candidate in svc._active_processes:
+                        run_id = candidate
+                        spawn_latency = time.monotonic() - started_at
+                        break
+                    time.sleep(0.01)
+                self.assertIsNotNone(spawn_latency, "the command never reached Popen")
+                self.assertLess(
+                    spawn_latency,
+                    1.5,
+                    f"Popen waited {spawn_latency:.1f}s on the notifier "
+                    f"(notifier stalled {stall_seconds:.0f}s); it must not sit behind a network call",
+                )
+            finally:
+                stalling.clear()
+                proc = svc._active_processes.get(run_id) if run_id else None
+                if proc is not None:
+                    proc.terminate()
+                worker.join(timeout=20)
+
+    def test_network_probe_never_resolves_a_name(self):
+        """_network_ready must not call getaddrinfo — that is the call that blocks."""
+        import socket
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+
+            def _forbidden(*_args, **_kwargs):
+                raise AssertionError("_network_ready resolved a name")
+
+            with patch.object(socket, "getaddrinfo", _forbidden):
+                started_at = time.monotonic()
+                ready = svc._network_ready()
+                elapsed = time.monotonic() - started_at
+            self.assertIsInstance(ready, bool)
+            self.assertLess(elapsed, 2.0, "the readiness probe must be near-instant")
+
+            os.environ["WAKELITE_FORCE_NETWORK_DOWN"] = "1"
+            try:
+                self.assertFalse(
+                    svc._network_ready(refresh=True),
+                    "WAKELITE_FORCE_NETWORK_DOWN must force the probe to report not ready",
+                )
+            finally:
+                os.environ.pop("WAKELITE_FORCE_NETWORK_DOWN", None)
+
+    def test_run_waits_for_network_in_boot_window_then_spawns(self):
+        """Inside the boot window a not-ready network defers Popen, then the run executes."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            marker = Path(td) / "network-wait-marker"
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-boot-wait", shell=f"touch {marker}")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            probe_calls: list[float] = []
+            lock = threading.Lock()
+
+            def _probe(*_args, **_kwargs) -> bool:
+                with lock:
+                    probe_calls.append(time.monotonic())
+                    return len(probe_calls) > 2
+
+            svc._network_ready = _probe
+            svc._started_monotonic = time.monotonic()  # inside the boot window
+
+            started_at = time.monotonic()
+            with patch.object(svc, "NETWORK_WAIT_POLL_SECONDS", 0.2):
+                svc._run_occurrence(timer, scheduled_at, False, None, None)
+            elapsed = time.monotonic() - started_at
+
+            self.assertGreaterEqual(
+                len(probe_calls), 2, "the run never polled the network readiness probe"
+            )
+            self.assertGreaterEqual(
+                elapsed, 0.2, "the run did not wait at least one poll interval for the network"
+            )
+            self.assertLess(elapsed, 15.0, "the run waited far longer than the poll it needed")
+            self.assertTrue(marker.exists(), "the command never ran")
+
+            run_id = svc.state.list_runs(limit=1, timer_id=timer_id)[0]["run_id"]
+            self.assertEqual(svc.state.get_run(run_id)["status"], "success")
+            self.assertEqual(
+                self._occurrence_status(svc, timer_id, scheduled_at),
+                "success",
+                "the network path must not leave the occurrence pending — a pending "
+                "occurrence is skipped by _process_due until the next scheduled time",
+            )
+
+    def test_run_now_outside_boot_window_does_not_wait(self):
+        """A human run-now long after boot must not sit through the boot-window wait."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            marker = Path(td) / "run-now-marker"
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-run-now", shell=f"touch {marker}")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._started_monotonic = time.monotonic() - 3600  # long past the boot window
+            os.environ["WAKELITE_FORCE_NETWORK_DOWN"] = "1"
+            try:
+                started_at = time.monotonic()
+                svc._run_occurrence(timer, scheduled_at, False, "run_now", None)
+                elapsed = time.monotonic() - started_at
+            finally:
+                os.environ.pop("WAKELITE_FORCE_NETWORK_DOWN", None)
+
+            self.assertLess(
+                elapsed, 3.0, f"run-now waited {elapsed:.1f}s on a network it does not need"
+            )
+            self.assertTrue(marker.exists(), "the command never ran")
+            run_id = svc.state.list_runs(limit=1, timer_id=timer_id)[0]["run_id"]
+            self.assertEqual(svc.state.get_run(run_id)["status"], "success")
+            self.assertEqual(
+                self._occurrence_status(svc, timer_id, scheduled_at), "success"
+            )
+
+
+# Runs in a throwaway interpreter that the test then SIGKILLs, which is the only
+# faithful way to produce the orphan: a child spawned through the real
+# _run_occurrence env-injection path whose runner died without calling stop().
+_ORPHAN_SPAWNER_SOURCE = '''\
+import json
+import os
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+
+home = sys.argv[1]
+os.environ["HOME"] = home
+os.environ["WAKELITE_HOME"] = home
+
+from wakelite.service import WakeLiteService
+
+svc = WakeLiteService(tick_seconds=15)
+timer = svc.timer_store.create_timer({
+    "name": "daemon-orphan-survivor",
+    "comment": "Daemon child that outlives a SIGKILLed runner",
+    "enabled": True,
+    "timer_type": "daemon",
+    "recurrence": {"frequency": "interval", "every": "0s"},
+    "command": {"mode": "shell", "shell": "exec sleep 300"},
+    "notifications": {"slackActivity": False},
+})
+scheduled_at = datetime.now(timezone.utc).isoformat()
+svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+threading.Thread(
+    target=svc._run_occurrence,
+    args=(timer, scheduled_at, False, "daemon_start", None),
+    daemon=True,
+).start()
+
+row = None
+deadline = time.time() + 30
+while time.time() < deadline:
+    rows = svc.state.get_active_runs_for_timer(timer["id"])
+    if rows and rows[0].get("pid"):
+        row = rows[0]
+        break
+    time.sleep(0.05)
+
+marker = os.path.join(home, "orphan.json.tmp")
+with open(marker, "w") as fh:
+    json.dump(row, fh)
+os.rename(marker, os.path.join(home, "orphan.json"))
+
+time.sleep(600)
+'''
+
+
+class OrphanReclaimTests(unittest.TestCase):
+    """Startup reclaim of children that outlived an unclean runner exit.
+
+    Regression for 2026-09-07: commit 9754fbd closed the in-process spawn race,
+    but a SIGKILLed or power-cut runner still leaves its children running
+    (start_new_session=True). Nothing reclaimed them, so the old process kept
+    the daemon's port and every restart failed with EADDRINUSE.
+    """
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _kill_pid(self, pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _spawn_foreign_sleep(self) -> subprocess.Popen:
+        proc = subprocess.Popen(["/bin/sleep", "120"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(self._kill_pid, proc.pid)
+        return proc
+
+    def test_child_of_sigkilled_runner_is_reclaimed_on_next_start(self):
+        repo_root = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as td:
+            spawner_env = os.environ.copy()
+            spawner_env["PYTHONPATH"] = repo_root
+            spawner_env["HOME"] = td
+            spawner_env["WAKELITE_HOME"] = td
+            spawner_log = Path(td) / "spawner.log"
+            marker = Path(td) / "orphan.json"
+
+            with spawner_log.open("wb") as log:
+                spawner = subprocess.Popen(
+                    [sys.executable, "-c", _ORPHAN_SPAWNER_SOURCE, td],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=spawner_env,
+                )
+            self.addCleanup(spawner.wait)
+            self.addCleanup(self._kill_pid, spawner.pid)
+
+            deadline = time.time() + 60
+            while time.time() < deadline and not marker.exists():
+                if spawner.poll() is not None:
+                    self.fail(f"spawner exited early:\n{spawner_log.read_text()}")
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), f"spawner never spawned a child:\n{spawner_log.read_text()}")
+
+            row = json.loads(marker.read_text())
+            self.assertIsNotNone(row, "spawner recorded no active_runs row")
+            pid = int(row["pid"])
+            timer_id = row["timer_id"]
+            self.addCleanup(self._kill_pid, pid)
+
+            # SIGKILL: the runner dies with no chance to run stop().
+            spawner.kill()
+            spawner.wait(timeout=10)
+            self.assertTrue(self._pid_alive(pid), "the child should outlive the killed runner")
+
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            try:
+                with patch.object(svc, "_enqueue_or_spawn"), patch.object(svc, "_scheduler_loop"):
+                    svc.start()
+
+                deadline = time.time() + 10
+                while time.time() < deadline and self._pid_alive(pid):
+                    time.sleep(0.05)
+                self.assertFalse(
+                    self._pid_alive(pid),
+                    f"orphaned pid {pid} still running after startup reclaim",
+                )
+
+                reclaimed = [
+                    inc for inc in svc.state.list_incidents(limit=200)
+                    if inc["type"] == "orphan_reclaimed"
+                ]
+                self.assertEqual(len(reclaimed), 1, f"expected one orphan_reclaimed incident, got {reclaimed}")
+                self.assertIn(str(pid), reclaimed[0]["message"])
+                self.assertEqual(reclaimed[0]["timer_id"], timer_id)
+            finally:
+                svc.stop()
+
+    def test_live_pid_that_is_not_ours_is_left_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("orphan-pid-reuse"))
+            timer_id = timer["id"]
+            foreign = self._spawn_foreign_sleep()
+
+            run_id = "run-recycled-pid"
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.set_runtime_running(timer_id, run_id, scheduled_at)
+            # A PID recycled after the crash: the number matches, the process
+            # behind it does not.
+            svc.state.update_active_run_pid(run_id, foreign.pid, "Thu Jan  1 00:00:00 1970")
+
+            outcomes = svc._reclaim_orphaned_processes()
+
+            self.assertEqual([o["action"] for o in outcomes], ["pid_reused"], f"outcomes={outcomes}")
+            self.assertEqual(outcomes[0]["pid"], foreign.pid)
+            self.assertTrue(self._pid_alive(foreign.pid), "a foreign process must never be signalled")
+            self.assertIsNone(foreign.poll())
+
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertIn("pid_reused", types)
+            self.assertNotIn("orphan_reclaimed", types)
+
+    def test_row_older_than_boot_time_is_skipped_without_signalling(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("orphan-pre-boot"))
+            timer_id = timer["id"]
+            survivor = self._spawn_foreign_sleep()
+
+            run_id = "run-from-a-previous-boot"
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.set_runtime_running(timer_id, run_id, scheduled_at)
+            svc.state.update_active_run_pid(run_id, survivor.pid, "Thu Jan  1 00:00:00 1970")
+            svc.state._connect().execute(
+                "UPDATE active_runs SET started_at = ? WHERE run_id = ?",
+                ("2001-01-01T00:00:00+00:00", run_id),
+            )
+
+            outcomes = svc._reclaim_orphaned_processes()
+
+            self.assertEqual([o["action"] for o in outcomes], ["skipped_pre_boot"], f"outcomes={outcomes}")
+            self.assertTrue(self._pid_alive(survivor.pid))
+            self.assertIsNone(survivor.poll())
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertNotIn("orphan_reclaimed", types)
+            self.assertNotIn("pid_reused", types)
+
+
+_FOREIGN_LISTENER_SOURCE = '''\
+import socket
+import sys
+import time
+
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", 0))
+sock.listen(5)
+print(sock.getsockname()[1], flush=True)
+time.sleep(600)
+'''
+
+
+class DeclaredPortTests(unittest.TestCase):
+    """resources[].port: clear the port before a daemon spawns, or refuse to spawn."""
+
+    def _start_foreign_listener(self) -> int:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _FOREIGN_LISTENER_SOURCE],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        port = int(proc.stdout.readline().strip())
+        return port
+
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    @staticmethod
+    def _port_daemon(name: str, port: int, shell: str = "sleep 30"):
+        return {
+            "name": name,
+            "comment": "Daemon that owns a TCP port",
+            "enabled": True,
+            "timer_type": "daemon",
+            "recurrence": {"frequency": "interval", "every": "0s"},
+            "command": {"mode": "shell", "shell": shell},
+            "resources": [{"name": "listen-port", "port": port}],
+        }
+
+    def test_port_key_is_accepted_and_range_checked(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(self._port_daemon("port-ok", 17382))
+            self.assertEqual(timer["resources"][0]["port"], 17382)
+
+            with self.assertRaises(ValueError) as ctx:
+                svc.timer_store.create_timer(self._port_daemon("port-bad", 70000))
+            self.assertIn("port must be an integer between 1 and 65535", str(ctx.exception))
+
+    def test_daemon_does_not_spawn_when_its_port_is_held_by_a_stranger(self):
+        port = self._start_foreign_listener()
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(self._port_daemon("port-blocked", port))
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._run_occurrence(timer, scheduled_at, False, "daemon_start", None)
+
+            run = svc.state.list_runs(limit=5, timer_id=timer_id)[0]
+            self.assertEqual(run["status"], "failed")
+            self.assertIn(f"port {port} is held by foreign pid", run["message"])
+            self.assertEqual(svc._active_processes, {})
+
+            incidents = [
+                inc for inc in svc.state.list_incidents(limit=200)
+                if inc["type"] == "resource_held_by_foreign"
+            ]
+            self.assertEqual(len(incidents), 1, f"expected one incident, got {incidents}")
+            self.assertEqual(incidents[0]["timer_id"], timer_id)
+
+    def test_daemon_with_a_free_declared_port_spawns_normally(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=1)
+            timer = svc.timer_store.create_timer(
+                self._port_daemon("port-free", self._free_port(), shell="true")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._run_occurrence(timer, scheduled_at, False, "daemon_start", None)
+
+            run = svc.state.list_runs(limit=5, timer_id=timer_id)[0]
+            self.assertEqual(run["status"], "success", run["message"])
+            types = [inc["type"] for inc in svc.state.list_incidents(limit=200)]
+            self.assertNotIn("resource_held_by_foreign", types)
+
+
+class DoctorTests(unittest.TestCase):
+    """`wakelitectl doctor` — the one command that says what is wrong.
+
+    The case that matters most is a hung runner: the REST API is exactly the
+    thing that stops answering, so every fact in the report has to be
+    reachable from state.db on its own.
+    """
+
+    def _load_doctor(self):
+        import wakelite.doctor as doctor_module
+
+        importlib.reload(doctor_module)
+        return doctor_module
+
+    def _clock(self, start):
+        holder = {"now": start}
+        return holder, (lambda: holder["now"])
+
+    def _doctor(self, doctor_module, svc, **overrides):
+        kwargs = {
+            "db_path": svc.state.db_path,
+            "api_get": lambda path: None,
+            "process_snapshot": lambda: [],
+            "port_holders": lambda port: [],
+            "launchctl": lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+            "orphan_reclaim": lambda state: [],
+            "uid": 501,
+        }
+        kwargs.update(overrides)
+        return doctor_module.Doctor(**kwargs)
+
+    def test_heartbeat_age_decides_healthy_versus_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            fresh = (now - timedelta(seconds=10)).isoformat()
+            stale = (now - timedelta(seconds=400)).isoformat()
+
+            def api_get_with(heartbeat):
+                return lambda path: {"runner_heartbeat": heartbeat} if path == "/v1/health" else {"timers": []}
+
+            healthy = self._doctor(
+                doctor_module, svc, api_get=api_get_with(fresh), now=lambda: now
+            ).report()
+            self.assertEqual(healthy["runner"]["status"], "healthy")
+            self.assertEqual(healthy["source"], "api")
+            self.assertAlmostEqual(healthy["runner"]["heartbeat_age_seconds"], 10.0, places=1)
+            self.assertEqual(healthy["problems"], [])
+
+            stalled = self._doctor(
+                doctor_module, svc, api_get=api_get_with(stale), now=lambda: now
+            ).report()
+            self.assertEqual(stalled["runner"]["status"], "stale")
+            self.assertAlmostEqual(stalled["runner"]["heartbeat_age_seconds"], 400.0, places=1)
+            self.assertTrue(
+                any("heartbeat" in problem for problem in stalled["problems"]),
+                stalled["problems"],
+            )
+
+    def test_report_is_complete_when_the_rest_api_is_unreachable(self):
+        """The hung-runner case: REST is dead, so every fact comes from state.db."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            svc.state.set_meta("runner.heartbeat", (now - timedelta(seconds=600)).isoformat())
+            svc.state.set_meta("watchdog.last_run", (now - timedelta(minutes=20)).isoformat())
+
+            daemon = svc.timer_store.create_timer({
+                "name": "focus-server",
+                "comment": "Daemon holding a TCP port",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "python3 -m focus.server --port 17382"},
+                "resources": [{"name": "focus-port", "description": "listens on 127.0.0.1:17382"}],
+            })
+            svc.state.set_runtime_running(daemon["id"], "run-dead", "2026-09-07T11:00:00+00:00", pid=999999)
+
+            # Real shape of cmux-focus-server: a resource that names a port
+            # and records the number nowhere.
+            mute = svc.timer_store.create_timer({
+                "name": "focus-server-portless",
+                "comment": "Declares a port resource with no number",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "exec /opt/homebrew/bin/python3 server.py"},
+                "resources": [{"name": "cmux-focus-port", "description": "the focus socket"}],
+            })
+
+            poller = svc.timer_store.create_timer(_basic_timer("build-poller", shell="exit 1"))
+            stderr_path = Path(td) / "poller.err.log"
+            stderr_path.write_text("zsh: read-only variable: status\n", encoding="utf-8")
+            for index in range(3):
+                scheduled_at = f"2026-09-07T10:0{index}:00+00:00"
+                run = svc.state.create_run(
+                    timer_id=poller["id"],
+                    timer_name=poller["name"],
+                    scheduled_at=scheduled_at,
+                    is_catchup=False,
+                    queued_reason=None,
+                )
+                svc.state.finish_run(
+                    run_id=run["run_id"],
+                    timer_id=poller["id"],
+                    scheduled_at=scheduled_at,
+                    status="failed",
+                    exit_code=1,
+                    message="exit code 1",
+                    stdout_path=None,
+                    stderr_path=str(stderr_path),
+                )
+
+            svc.state.add_incident("error", "run_failed", "boom", poller["id"])
+            svc.state.add_incident("error", "run_failed", "boom again", poller["id"])
+            svc.state.add_incident("warn", "crash_recovery", "recovered", daemon["id"])
+
+            def unreachable(path):
+                raise RuntimeError("WakeLite service unavailable")
+
+            report = self._doctor(
+                doctor_module,
+                svc,
+                api_get=unreachable,
+                port_holders=lambda port: [9931] if port == 17382 else [],
+                now=lambda: now,
+            ).report()
+
+            self.assertEqual(report["source"], "database")
+            self.assertEqual(report["runner"]["status"], "stale")
+
+            daemons = {d["timer_id"]: d for d in report["daemons"]}
+            self.assertIn(daemon["id"], daemons)
+            self.assertFalse(daemons[daemon["id"]]["alive"])
+
+            ports = {p["port"]: p for p in report["ports"]}
+            self.assertEqual(
+                sorted(ports),
+                [17382],
+                "an octet of 127.0.0.1 must not be mistaken for a declared port",
+            )
+            self.assertEqual(ports[17382]["holders"], [9931])
+            self.assertFalse(ports[17382]["ours"])
+
+            hints = {h["timer_id"]: h for h in report["port_hints"]}
+            self.assertEqual(hints[mute["id"]]["resource"], "cmux-focus-port")
+            self.assertNotIn(daemon["id"], hints, "a parsed port must not also raise a hint")
+
+            failing = {f["timer_id"]: f for f in report["failing_timers"]}
+            self.assertIn(poller["id"], failing)
+            self.assertEqual(failing[poller["id"]]["streak"], 3)
+            self.assertEqual(
+                failing[poller["id"]]["last_stderr_line"],
+                "zsh: read-only variable: status",
+            )
+
+            self.assertEqual(report["incidents"]["unacked_total"], 3)
+            self.assertEqual(report["incidents"]["by_type"]["run_failed"], 2)
+            self.assertEqual(report["watchdog"]["last_run"][:16], (now - timedelta(minutes=20)).isoformat()[:16])
+
+    def test_fix_kicks_a_stale_runner_once_per_thirty_minutes(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            clock, now = self._clock(datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc))
+            svc.state.set_meta("runner.heartbeat", (clock["now"] - timedelta(seconds=600)).isoformat())
+
+            calls = []
+
+            def fake_launchctl(argv):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            doc = self._doctor(doctor_module, svc, launchctl=fake_launchctl, now=now)
+
+            first = doc.fix(doc.report())
+            kicks = [a for a in first if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["kicked"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                calls[0],
+                ["launchctl", "kickstart", "-k", "gui/501/com.wakelite.runner"],
+            )
+
+            clock["now"] += timedelta(minutes=5)
+            second = doc.fix(doc.report())
+            kicks = [a for a in second if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["skipped"])
+            self.assertEqual(len(calls), 1, "a second kick inside the cooldown must not run")
+
+    def test_two_failed_kicks_in_two_hours_escalate_instead_of_looping(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            clock, now = self._clock(datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc))
+
+            def stale_heartbeat():
+                svc.state.set_meta(
+                    "runner.heartbeat", (clock["now"] - timedelta(seconds=600)).isoformat()
+                )
+
+            calls = []
+
+            def fake_launchctl(argv):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            doc = self._doctor(doctor_module, svc, launchctl=fake_launchctl, now=now)
+
+            stale_heartbeat()
+            doc.fix(doc.report())
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            doc.fix(doc.report())
+            self.assertEqual(len(calls), 2)
+
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            third = doc.fix(doc.report())
+            kicks = [a for a in third if a["action"] == "runner_kick"]
+            self.assertEqual([a["status"] for a in kicks], ["escalated"])
+            self.assertEqual(len(calls), 2, "escalation must replace the kick, not follow it")
+
+            critical = svc.state.list_incidents(include_acked=False, severity="critical")
+            self.assertEqual(len(critical), 1, [i["message"] for i in critical])
+            self.assertIn("kick", critical[0]["message"].lower())
+
+            clock["now"] += timedelta(minutes=35)
+            stale_heartbeat()
+            doc.fix(doc.report())
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                len(svc.state.list_incidents(include_acked=False, severity="critical")),
+                1,
+                "escalation must raise one incident, not one per check",
+            )
+
+    def test_quiet_prints_nothing_on_a_healthy_system(self):
+        with tempfile.TemporaryDirectory() as td:
+            import io
+
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+
+            now = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+            heartbeat = (now - timedelta(seconds=5)).isoformat()
+            # Open incidents are a fact of life on this box (142 of them today).
+            # They are informational, so they must not break the silence.
+            for index in range(3):
+                svc.state.add_incident("warn", "crash_recovery", f"old news {index}")
+
+            doc = self._doctor(
+                doctor_module,
+                svc,
+                api_get=lambda path: {"runner_heartbeat": heartbeat} if path == "/v1/health" else {"timers": []},
+                now=lambda: now,
+            )
+
+            quiet = io.StringIO()
+            exit_code = doc.run(quiet=True, stream=quiet)
+            self.assertEqual(quiet.getvalue(), "")
+            self.assertEqual(exit_code, 0)
+
+            loud = io.StringIO()
+            doc.run(quiet=False, stream=loud)
+            self.assertIn("healthy", loud.getvalue())
+
+
+class AlertCollapseTests(unittest.TestCase):
+    """One root cause must file one incident and a countable handful of alerts.
+
+    2026-09-07: a single held TCP port produced 38 run_failed incidents and a
+    Slack post per restart. Across 30 days the machine held 272 run_failed rows,
+    142 still unacknowledged, which is exactly how a real failure goes unseen.
+    """
+
+    _STREAK_RE = re.compile(r"streak=(\d+)")
+
+    @staticmethod
+    def _run_once(svc, timer, index):
+        svc._run_occurrence(
+            timer,
+            f"2026-09-07T10:{index:02d}:00+00:00",
+            is_catchup=False,
+            queued_reason=None,
+            retry_of_run_id=None,
+        )
+
+    @staticmethod
+    def _slack_messages(svc):
+        return [call.args[0] for call in svc.notifier.notify_slack.call_args_list]
+
+    def _sent_lines(self, captured, kind):
+        return [line for line in captured.output if "notify.sent" in line and f"kind={kind}" in line]
+
+    def test_ten_identical_failures_collapse_to_one_incident_and_three_alerts(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("collapse-storm", "exit 1"))
+
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                for index in range(10):
+                    self._run_once(svc, timer, index)
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="run_failed")
+            self.assertEqual(
+                len(incidents), 1, f"one root cause filed {len(incidents)} incident rows"
+            )
+            self.assertEqual(incidents[0]["count"], 10)
+            self.assertIsNotNone(incidents[0]["last_seen_at"])
+            self.assertGreater(incidents[0]["last_seen_at"], incidents[0]["created_at"])
+
+            sent = self._sent_lines(captured, "run_failed")
+            self.assertEqual(
+                [self._STREAK_RE.search(line).group(1) for line in sent],
+                ["1", "3", "10"],
+                f"expected alerts at streak 1/3/10, got {sent}",
+            )
+            self.assertEqual(svc.notifier.notify.call_count, 3)
+
+            started = [m for m in self._slack_messages(svc) if "started" in m.lower()]
+            self.assertEqual(
+                len(started), 2, f"a suppressed streak still posted {len(started)} start messages"
+            )
+            status_posts = [m for m in self._slack_messages(svc) if "*Failed*" in m]
+            self.assertEqual(len(status_posts), 1, f"status replies were not collapsed: {status_posts}")
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 10)
+            self.assertEqual(runtime.streak_message, "exit code 1")
+            self.assertIsNotNone(runtime.streak_started_at)
+
+    def test_success_after_a_streak_sends_exactly_one_recovery_message(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            flag = Path(td) / "exit-code"
+            flag.write_text("1")
+            timer = svc.timer_store.create_timer(
+                _basic_timer("collapse-recovery", f"exit $(cat {flag})")
+            )
+
+            for index in range(4):
+                self._run_once(svc, timer, index)
+            self.assertEqual(svc.state.get_runtime(timer["id"]).failure_streak, 4)
+
+            before = svc.notifier.notify.call_count
+            flag.write_text("0")
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                self._run_once(svc, timer, 4)
+
+            self.assertEqual(len(self._sent_lines(captured, "recovered")), 1)
+            self.assertEqual(svc.notifier.notify.call_count - before, 1)
+            recovery = svc.notifier.notify.call_args_list[-1].args[1].lower()
+            self.assertIn("recovered after 4", recovery)
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 0)
+            self.assertIsNone(runtime.streak_message)
+            self.assertEqual(runtime.last_notified_streak, 0)
+
+            # A second success must not repeat the recovery message.
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured_again:
+                logging.getLogger("wakelite.notifier").info("probe")
+                self._run_once(svc, timer, 5)
+            self.assertEqual(self._sent_lines(captured_again, "recovered"), [])
+
+    def test_a_different_failure_message_starts_a_new_streak(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            flag = Path(td) / "exit-code"
+            flag.write_text("1")
+            timer = svc.timer_store.create_timer(
+                _basic_timer("collapse-new-cause", f"exit $(cat {flag})")
+            )
+
+            with self.assertLogs("wakelite.notifier", level="INFO") as captured:
+                for index in range(2):
+                    self._run_once(svc, timer, index)
+                flag.write_text("2")
+                self._run_once(svc, timer, 2)
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="run_failed")
+            self.assertEqual(len(incidents), 2, f"a new cause did not open its own incident: {incidents}")
+            self.assertEqual(
+                sorted((row["message"], row["count"]) for row in incidents),
+                [
+                    (f"Timer {timer['id']} failed: exit code 1", 2),
+                    (f"Timer {timer['id']} failed: exit code 2", 1),
+                ],
+            )
+
+            runtime = svc.state.get_runtime(timer["id"])
+            self.assertEqual(runtime.failure_streak, 1)
+            self.assertEqual(runtime.streak_message, "exit code 2")
+
+            sent = self._sent_lines(captured, "run_failed")
+            self.assertEqual(
+                [self._STREAK_RE.search(line).group(1) for line in sent],
+                ["1", "1"],
+                f"a new cause must alert immediately, got {sent}",
+            )
+
+    def test_the_daily_slack_thread_survives_a_runner_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            _bootstrap(td)
+            import wakelite.notifier as notifier_module
+            import wakelite.state as state_module
+
+            store = state_module.StateStore()
+            first = notifier_module.Notifier(meta_store=store)
+            with patch.object(first, "notify_slack", return_value="ts-1") as post:
+                self.assertEqual(first.get_daily_thread_ts(), "ts-1")
+                post.assert_called_once()
+
+            # A fresh Notifier stands in for the next runner process.
+            second = notifier_module.Notifier(meta_store=store)
+            with patch.object(second, "notify_slack", return_value="ts-2") as post_again:
+                self.assertEqual(second.get_daily_thread_ts(), "ts-1")
+                post_again.assert_not_called()
+
+            day = datetime.now().strftime("%Y-%m-%d")
+            self.assertEqual(store.get_meta(f"slack.daily_thread_ts.{day}"), "ts-1")
+
+
+class StalledWaitTests(unittest.TestCase):
+    """A wait is fine; a wait nobody ends is a stuck poller nobody hears about.
+
+    mcp-feature-catalog-protocol-health logged 1,238 silent waits over 30 days
+    and reported nothing.
+    """
+
+    def _waiting_run(self, svc, timer, scheduled_at, created_at):
+        run = svc.state.create_run(
+            timer_id=timer["id"],
+            timer_name=timer["name"],
+            scheduled_at=scheduled_at,
+            is_catchup=False,
+            queued_reason=None,
+        )
+        svc.state.finish_run(
+            run_id=run["run_id"],
+            timer_id=timer["id"],
+            scheduled_at=scheduled_at,
+            status="waiting",
+            exit_code=75,
+            message="not ready yet (EX_TEMPFAIL)",
+            stdout_path=None,
+            stderr_path=None,
+        )
+        with svc.state._connect() as conn:
+            conn.execute(
+                "UPDATE run_history SET created_at = ?, started_at = ?, finished_at = ? WHERE run_id = ?",
+                (created_at, created_at, created_at, run["run_id"]),
+            )
+        return run["run_id"]
+
+    @staticmethod
+    def _hours_ago(hours):
+        return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    def test_a_day_of_unbroken_waiting_raises_one_info_incident(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(_basic_timer("stuck-poller", "exit 75"))
+            for hours in (30, 20, 1):
+                self._waiting_run(svc, timer, f"2026-09-06T{hours:02d}:00:00+00:00", self._hours_ago(hours))
+
+            svc._report_stalled_waits()
+            svc._report_stalled_waits()
+
+            incidents = svc.state.list_incidents(limit=50, incident_type="waiting_stalled")
+            self.assertEqual(len(incidents), 1, f"a stalled wait filed {len(incidents)} rows")
+            self.assertEqual(incidents[0]["severity"], "info")
+            self.assertEqual(incidents[0]["timer_id"], timer["id"])
+            self.assertEqual(incidents[0]["count"], 2)
+            self.assertIn("waiting", incidents[0]["message"].lower())
+
+    def test_a_short_wait_or_a_settled_timer_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            fresh = svc.timer_store.create_timer(_basic_timer("fresh-wait", "exit 75"))
+            self._waiting_run(svc, fresh, "2026-09-07T09:00:00+00:00", self._hours_ago(2))
+
+            settled = svc.timer_store.create_timer(_basic_timer("settled-wait", "exit 75"))
+            self._waiting_run(svc, settled, "2026-09-06T04:00:00+00:00", self._hours_ago(30))
+            run = svc.state.create_run(
+                timer_id=settled["id"],
+                timer_name=settled["name"],
+                scheduled_at="2026-09-07T09:00:00+00:00",
+                is_catchup=False,
+                queued_reason=None,
+            )
+            svc.state.finish_run(
+                run_id=run["run_id"],
+                timer_id=settled["id"],
+                scheduled_at="2026-09-07T09:00:00+00:00",
+                status="success",
+                exit_code=0,
+                message="completed",
+                stdout_path=None,
+                stderr_path=None,
+            )
+
+            svc._report_stalled_waits()
+
+            self.assertEqual(svc.state.list_incidents(limit=50, incident_type="waiting_stalled"), [])
+
+
+class DaemonFlapBreakerTests(unittest.TestCase):
+    """A daemon that dies just past the old 60s floor must stay backed off.
+
+    With the floor at 60, cmux-focus-server died every ~65s, cleared its backoff
+    on every attempt and restarted 37 times in a row at full speed.
+    """
+
+    def _daemon(self, svc, name):
+        return svc.timer_store.create_timer({
+            "name": name,
+            "comment": "Daemon under the flap breaker",
+            "enabled": True,
+            "timer_type": "daemon",
+            "recurrence": {"frequency": "interval", "every": "0s"},
+            "execution": {
+                "restart_on_failure": True,
+                "restart_delay_seconds": 5,
+                "restart_max_backoff_seconds": 300,
+            },
+            "command": {"mode": "shell", "shell": "exit 1"},
+        })
+
+    @staticmethod
+    def _run_with_uptime(svc, timer, uptime):
+        """Drive one real daemon run whose measured uptime is `uptime` seconds."""
+        import wakelite.service as service_module
+
+        calls = []
+
+        def fake_monotonic():
+            calls.append(None)
+            return 1000.0 if len(calls) == 1 else 1000.0 + uptime
+
+        with patch.object(service_module.time, "monotonic", fake_monotonic):
+            svc._run_occurrence(
+                timer,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                is_catchup=False,
+                queued_reason="daemon_start",
+                retry_of_run_id=None,
+            )
+
+    def test_uptime_below_the_healthy_floor_keeps_the_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = self._daemon(svc, "daemon-fast-flap")
+            svc.state.set_daemon_state(timer["id"], status="stopped", current_backoff_seconds=120)
+
+            self._run_with_uptime(svc, timer, uptime=65.0)
+
+            self.assertEqual(
+                svc.state.get_daemon_state(timer["id"]).current_backoff_seconds,
+                120,
+                "a daemon that died after 65s was treated as healthy and reset its backoff",
+            )
+
+    def test_uptime_past_the_healthy_floor_clears_the_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = self._daemon(svc, "daemon-long-lived")
+            svc.state.set_daemon_state(timer["id"], status="stopped", current_backoff_seconds=120)
+
+            self._run_with_uptime(svc, timer, uptime=400.0)
+
+            self.assertEqual(
+                svc.state.get_daemon_state(timer["id"]).current_backoff_seconds, 0
+            )
+
+
+class ReclaimHookContractTests(unittest.TestCase):
+    """R6's doctor and R1's reclaim must actually connect.
+
+    doctor._resolve_orphan_reclaim() looks the entrypoint up by name on the
+    module — `wakelite.service.reclaim_orphans(state)` — so that doctor works
+    standalone and picks R1 up the moment it merges. R1 landed its reclaim as
+    private methods on the service class instead, so the lookup returns None
+    and `doctor --fix` action 1 reports "not present in this build" forever.
+
+    It fails quietly, which is why this test exists: nothing else surfaces it.
+    R7's watchdog runs `doctor --fix` on a schedule, so an inert action 1 means
+    the watchdog kicks a stale runner and never reclaims the orphans the kick
+    creates — the exact failure R1 and R5 exist to prevent.
+
+    Written by the conductor after merging the four branches. The fix is a
+    design call for the plan owner: either expose a module-level
+    reclaim_orphans(state) wrapper, or change doctor's resolution to the bound
+    method and update its three references. Note the signatures differ too.
+    """
+
+    def test_doctor_can_resolve_the_reclaim_entrypoint(self):
+        from wakelite import doctor
+
+        hook = doctor._resolve_orphan_reclaim()
+        self.assertIsNotNone(
+            hook,
+            "doctor cannot find wakelite.service.reclaim_orphans, so `doctor --fix` "
+            "will never invoke R1's orphan reclaim",
+        )
+
+
+    def test_resolved_hook_actually_reclaims_a_live_orphan(self):
+        """The entrypoint must do the work, not merely exist.
+
+        A no-op `def reclaim_orphans(state): return []` satisfies the
+        resolution test above while leaving `doctor --fix` just as inert as a
+        missing hook. This drives a real process through the resolved hook.
+        """
+        from wakelite import doctor
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "doctor-reclaim-target",
+                "comment": "Orphan reclaimed through the doctor entrypoint",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 120"},
+            })
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+
+            # set_runtime_running is what creates the active_runs row the
+            # reclaim reads; create_run alone leaves nothing to update.
+            svc.state.set_runtime_running(timer["id"], run["run_id"], scheduled_at)
+
+            proc = subprocess.Popen(["/bin/sleep", "120"], start_new_session=True)
+            self.addCleanup(proc.wait)
+            self.addCleanup(OrphanReclaimTests._kill_pid, self, proc.pid)
+
+            svc.state.update_active_run_pid(
+                run["run_id"], proc.pid, WakeLiteService._pid_start_time(proc.pid)
+            )
+
+            hook = doctor._resolve_orphan_reclaim()
+            self.assertIsNotNone(hook, "no entrypoint to exercise")
+            outcomes = hook(svc.state)
+
+            # Reap before asserting: a SIGKILLed child of this test process
+            # stays a zombie until wait(), and os.kill(pid, 0) still succeeds
+            # for a zombie, so a PID probe cannot tell terminated from alive.
+            try:
+                returncode = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.fail("the resolved hook returned without terminating the orphan")
+            self.assertLess(
+                returncode, 0,
+                f"orphan exited {returncode}, expected termination by signal",
+            )
+            self.assertTrue(outcomes, "the hook reported no outcomes for a reclaimed orphan")
+            self.assertTrue(
+                any(o.get("pid") == proc.pid for o in outcomes),
+                f"outcomes do not mention the reclaimed pid: {outcomes}",
+            )
+
+
+class RunnerPlistExitTimeoutTests(unittest.TestCase):
+    """The installed runner must get longer than launchd's 5s default to stop.
+
+    Measured on this machine before the change: `launchctl print
+    gui/<uid>/com.wakelite.runner` reported `exit timeout = 5`. stop()
+    joins the scheduler for up to 5s and only then terminates children, so a
+    5s budget can expire mid-teardown. launchd then SIGKILLs the runner and its
+    children are orphaned, which is what R1 has to clean up afterwards.
+    """
+
+    def test_template_declares_a_sufficient_exit_timeout(self):
+        import plistlib
+
+        template = Path(__file__).resolve().parents[1] / "launchd" / "com.wakelite.runner.plist"
+        parsed = plistlib.loads(template.read_bytes())
+        timeout = parsed.get("ExitTimeOut")
+        self.assertIsNotNone(
+            timeout,
+            "runner plist declares no ExitTimeOut, so launchd applies its 5s default "
+            "and can SIGKILL the runner mid-teardown",
+        )
+        self.assertGreaterEqual(
+            timeout, 30,
+            f"ExitTimeOut {timeout}s leaves too little room: stop() may spend 5s joining "
+            "the scheduler before it even begins terminating children",
+        )
+
+
+class ShutdownParallelTerminationTests(unittest.TestCase):
+    """stop() must bound teardown by one grace period, not by child count.
+
+    launchd gives the runner a fixed ExitTimeOut and SIGKILLs it when that
+    expires. stop() terminated children one at a time, each with its own 5s
+    grace, so N stubborn children needed N*5s. Past the timeout launchd kills
+    the runner mid-teardown and the remaining children are orphaned
+    (start_new_session=True) — manufacturing exactly the orphans R1 exists to
+    reclaim, on every restart.
+    """
+
+    def test_stop_terminates_stubborn_children_concurrently(self):
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+
+            procs = []
+            for _ in range(3):
+                # Ignores SIGTERM, so each child costs a full grace period.
+                proc = subprocess.Popen(
+                    ["/bin/sh", "-c", 'trap "" TERM; sleep 60'],
+                    start_new_session=True,
+                )
+                procs.append(proc)
+                self.addCleanup(proc.wait)
+                self.addCleanup(proc.kill)
+
+            for i, proc in enumerate(procs):
+                svc._active_processes[f"run-{i}"] = proc
+
+            started = time.monotonic()
+            svc.stop()
+            elapsed = time.monotonic() - started
+
+            grace = 5.0
+            self.assertLess(
+                elapsed, grace * 2,
+                f"stop() took {elapsed:.1f}s for 3 stubborn children; sequential "
+                f"termination costs about {grace * 3:.0f}s, concurrent about {grace:.0f}s",
+            )
+            for i, proc in enumerate(procs):
+                self.assertIsNotNone(proc.poll(), f"child {i} survived stop()")
+
+
+class WatchdogTests(unittest.TestCase):
+    """R7. Nothing supervises the supervisor.
+
+    launchd KeepAlive restarts the runner only when the process exits. A runner
+    that is alive but not turning its loop — the case the heartbeat exists to
+    expose — is invisible to it, and no code reads the heartbeat and acts.
+
+    The watchdog is a separate LaunchAgent running `wakelitectl doctor
+    --watchdog`, so the human path and the scheduled path are the same code. It
+    must come after R5: a kick's own teardown manufactures orphans faster than
+    `doctor --fix` reclaims them when launchd's exit budget is 5s.
+    """
+
+    def _load_doctor(self):
+        import wakelite.doctor as doctor_module
+
+        importlib.reload(doctor_module)
+        return doctor_module
+
+    def test_watchdog_run_records_when_it_last_ran(self):
+        """Otherwise doctor's own watchdog line reads 'no record' forever.
+
+        A watchdog whose only failure mode is "did not run" needs that failure
+        to be visible; an indicator that is never written cannot show it.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+            svc.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
+
+            doc = doctor_module.Doctor(
+                db_path=svc.state.db_path,
+                api_get=lambda path: None,
+                process_snapshot=lambda: [],
+                port_holders=lambda port: [],
+                launchctl=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+                orphan_reclaim=lambda state: [],
+                uid=501,
+            )
+            self.assertIsNone(
+                svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN),
+                "precondition: nothing has stamped the marker yet",
+            )
+
+            doc.run(fix=True, quiet=True, watchdog=True)
+
+            stamped = svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN)
+            self.assertIsNotNone(
+                stamped,
+                "a watchdog run left no record, so doctor can never report that the "
+                "watchdog stopped running",
+            )
+
+    def test_manual_fix_does_not_masquerade_as_a_watchdog_run(self):
+        """A human running --fix must not reset the staleness indicator."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            doctor_module = self._load_doctor()
+            svc = WakeLiteService(tick_seconds=1)
+            svc.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
+
+            doc = doctor_module.Doctor(
+                db_path=svc.state.db_path,
+                api_get=lambda path: None,
+                process_snapshot=lambda: [],
+                port_holders=lambda port: [],
+                launchctl=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+                orphan_reclaim=lambda state: [],
+                uid=501,
+            )
+            doc.run(fix=True, quiet=True)
+
+            self.assertIsNone(
+                svc.state.get_meta(doctor_module.META_WATCHDOG_LAST_RUN),
+                "a manual --fix stamped the watchdog marker, hiding a dead watchdog",
+            )
+
+    def test_watchdog_plist_template_is_installable_and_calls_doctor(self):
+        import plistlib
+
+        from wakelite import launchd_install
+
+        template = Path(launchd_install.WATCHDOG_TEMPLATE)
+        self.assertTrue(template.exists(), f"no watchdog template at {template}")
+
+        parsed = plistlib.loads(template.read_bytes())
+        self.assertEqual(parsed.get("Label"), "com.wakelite.watchdog")
+
+        interval = parsed.get("StartInterval")
+        self.assertIsNotNone(interval, "watchdog plist has no StartInterval, so it runs once")
+        self.assertLessEqual(
+            interval, 600,
+            f"StartInterval {interval}s is longer than the 5min kick cooldown, so a "
+            "hung runner would wait longer than necessary",
+        )
+
+        argv = parsed.get("ProgramArguments") or []
+        self.assertTrue(
+            any("doctor" in str(a) for a in argv) and any("--watchdog" in str(a) for a in argv),
+            f"watchdog plist does not invoke `doctor --watchdog`: {argv}",
+        )
+        # RunAtLoad would fire a kick during every login and every reinstall.
+        self.assertFalse(parsed.get("RunAtLoad", False), "watchdog must not kick at load")
+
 
 
 if __name__ == "__main__":

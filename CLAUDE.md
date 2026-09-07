@@ -17,6 +17,7 @@ PYTHONPATH=. python -m pytest tests/test_recurrence.py -v
 
 # CLI commands (always need PYTHONPATH)
 PYTHONPATH=. ./bin/wakelitectl health
+PYTHONPATH=. ./bin/wakelitectl doctor # first command to run when something is wrong
 PYTHONPATH=. ./bin/wakelitectl timer list
 PYTHONPATH=. ./bin/wakelitectl launchd restart    # restart runner after code changes (purges __pycache__)
 ```
@@ -57,6 +58,7 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `http_api.py` | REST API handler + embedded web UI (single-file HTML/CSS/JS in Python string) |
 | `mcp_server.py` | MCP protocol bridge — translates MCP tool calls to REST API calls |
 | `reconciler.py` | Reads timer wake intents, reconciles with `pmset schedule` entries |
+| `doctor.py` | `wakelitectl doctor` — read-only diagnosis of heartbeat, daemons, ports, failure streaks, incidents. The only client that bypasses REST: it falls back to opening `state.db` directly, because a hung runner is exactly when the API stops answering. `--fix` does two bounded things (orphan reclaim, rate-limited `launchctl kickstart`) and records an incident for each |
 
 ### Data storage
 
@@ -172,6 +174,56 @@ fall back to defaults):
 
 Bucket arithmetic uses `.timestamp()` on datetimes so DST transitions
 don't skew the 7-day axis.
+
+## Boot-window network wait
+
+`_run_occurrence` starts the process first and posts "timer started" to Slack
+afterwards, so a stalled network can no longer delay `Popen`. On top of that,
+when the runner has been up for less than `BOOT_NETWORK_WINDOW_SECONDS` (300)
+and `_network_ready()` is false, the worker polls every
+`NETWORK_WAIT_POLL_SECONDS` (5) for at most `NETWORK_WAIT_MAX_SECONDS` (120)
+before starting the command anyway.
+
+`_network_ready()` never resolves a name — `getaddrinfo` is the call that blocks
+for tens of seconds after a boot. It shells out to `route -n get default`, then
+`scutil --nwi`, both of which answer in about a millisecond, and fails open if
+neither answers. The result is cached for one scheduler tick.
+
+Set `WAKELITE_FORCE_NETWORK_DOWN=1` to make the probe report "not ready" without
+touching the machine's real networking — this is how the wait is verified live.
+## Orphan reclaim (startup)
+
+Children are spawned with `start_new_session=True`, so a SIGKILLed or power-cut
+runner leaves them running. `start()` calls `_reclaim_orphaned_processes()`
+**before** the recovery loop, because `set_runtime_idle(timer_id)` with no
+`run_id` deletes the `active_runs` rows that hold the PIDs.
+
+Each row is (1) skipped if `started_at` predates `sysctl -n kern.boottime`,
+(2) skipped if the PID is gone, (3) identity-checked, then SIGTERM → 5s →
+SIGKILL, recording an `orphan_reclaimed` incident. A live PID that fails the
+identity check is left alone with a `pid_reused` incident; one that cannot be
+judged gets `orphan_unverified` and is also left alone.
+
+**Identity is process start time, not the command line and not the environment.**
+
+- Command line does not work: the timer runs `exec /opt/homebrew/bin/python3
+  <script>` but the live process reports argv[0] as
+  `/opt/homebrew/Cellar/python@3.14/.../Python`.
+- Environment does not work on macOS 26: `ps -E` (and `KERN_PROCARGS2` directly)
+  return only argv for a non-root caller, even for your own child. Measured on
+  26.5.1 build 25F80. `WAKELITE_RUN_ID` / `WAKELITE_TIMER_ID` are still injected
+  into every child and still checked first — they carry the check if the runner
+  ever runs as root, and on Linux where `/proc/<pid>/environ` is readable.
+- So `active_runs.pid_started_at` records `ps -o lstart=` at spawn, and reclaim
+  compares it. A recycled PID has a different start time. Rows written before
+  this column existed have no start time, so their processes are left alone.
+
+`resources[].port` is optional and opt-in. A daemon that declares one gets a
+`socket.bind` probe before spawn; the holder is found with `lsof` and reclaimed
+if it is ours (env marker, or an open fd on this timer's run log — the proof
+that survives the `active_runs` row being deleted). A foreign holder blocks the
+spawn with a `resource_held_by_foreign` incident instead of burning the restart
+budget on EADDRINUSE.
 
 ## Key gotchas
 

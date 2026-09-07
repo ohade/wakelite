@@ -20,7 +20,7 @@ ALLOWED_WAKE_KEYS = {"enabled", "action", "leadMinutes"}
 ALLOWED_NOTIFICATION_KEYS = {"onSuccess", "onFailure", "slackActivity"}
 ALLOWED_EXECUTION_KEYS = {"overlap", "max_concurrent", "restart_on_failure", "restart_delay_seconds", "restart_max_backoff_seconds"}
 ALLOWED_OVERLAP_VALUES = {"skip", "queue", "allow"}
-ALLOWED_RESOURCE_KEYS = {"name", "description", "capacity", "estimated_usage"}
+ALLOWED_RESOURCE_KEYS = {"name", "description", "capacity", "estimated_usage", "port"}
 ALLOWED_CALLBACK_TYPES = ("wezterm", "ghostty", "cmux")
 ALLOWED_CALLBACK_KEYS = {
     "wezterm": {"type", "pane_id", "session_id"},
@@ -127,6 +127,9 @@ class TimerStore:
                 unknown_res = set(res) - ALLOWED_RESOURCE_KEYS
                 if unknown_res:
                     raise ValueError(f"Unknown keys in resources[{i}]: {unknown_res}. Allowed: {', '.join(sorted(ALLOWED_RESOURCE_KEYS))}")
+                port = res.get("port")
+                if port is not None and (not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535):
+                    raise ValueError(f"resources[{i}].port must be an integer between 1 and 65535")
 
         max_runs = timer.get("max_runs")
         if max_runs is not None:

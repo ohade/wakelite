@@ -17,6 +17,12 @@
   <key>KeepAlive</key>
   <true/>
 
+  <!-- launchd defaults to 5s, then SIGKILLs. stop() can spend that long just
+       joining the scheduler thread before it starts terminating children, and a
+       SIGKILL mid-teardown orphans every child (start_new_session=True). -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.wakelite.watchdog</string>
+
+  <!-- Nothing else supervises the runner. launchd KeepAlive restarts it only
+       when the process exits; a runner that is alive but no longer turning its
+       scheduler loop is exactly what the heartbeat exists to expose, and
+       nothing acted on it. This agent runs the same `doctor` a human runs. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/wakelite/bin/wakelitectl</string>
+    <string>doctor</string>
+    <string>--watchdog</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- Deliberately absent: RunAtLoad. It would run a kick-capable check during
+       every login and every reinstall, when the runner has not had time to
+       write a heartbeat yet. -->
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/path/to/home</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONPATH</key>
+    <string>/path/to/wakelite</string>
+    <key>PYTHONDONTWRITEBYTECODE</key>
+    <string>1</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/path/to/home/.wakelite/logs/watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/home/.wakelite/logs/watchdog.err.log</string>
+</dict>
+</plist>

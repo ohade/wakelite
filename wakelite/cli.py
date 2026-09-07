@@ -65,6 +65,19 @@ def _cmd_health(args: argparse.Namespace) -> None:
     _print_json(_api_call("GET", "/v1/health"))
 
 
+def _cmd_doctor(args: argparse.Namespace) -> None:
+    # Imported here, not at module scope: doctor is the one subcommand that
+    # must survive a hung runner, and it reaches state.db directly rather than
+    # through _api_call.
+    from .doctor import run_doctor
+
+    raise SystemExit(
+        run_doctor(
+            fix=args.fix, quiet=args.quiet, as_json=args.json, watchdog=args.watchdog
+        )
+    )
+
+
 def _cmd_timer_list(args: argparse.Namespace) -> None:
     _print_json(_api_call("GET", "/v1/timers"))
 
@@ -362,6 +375,27 @@ def main() -> None:
 
     sub.add_parser("health", help="service health")
 
+    doctor = sub.add_parser(
+        "doctor",
+        help="diagnose runner, daemons, ports, failing timers (works when the runner is hung)",
+    )
+    doctor.add_argument(
+        "--fix",
+        action="store_true",
+        help="reclaim orphaned children and kickstart a stale runner",
+    )
+    doctor.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print nothing when healthy and nothing was fixed",
+    )
+    doctor.add_argument("--json", action="store_true", help="emit the raw report as JSON")
+    doctor.add_argument(
+        "--watchdog",
+        action="store_true",
+        help="scheduled mode: implies --fix --quiet and records that the watchdog ran",
+    )
+
     timer = sub.add_parser("timer", help="timer operations")
     timer_sub = timer.add_subparsers(dest="timer_cmd", required=True)
     timer_sub.add_parser("list")
@@ -392,7 +426,8 @@ def main() -> None:
     "restart_max_backoff_seconds": 300
   },
   "resources": [                                # optional (v2) - declare external resources
-    { "name": "slack-api", "capacity": "50 req/min", "estimated_usage": "6 req/min" }
+    { "name": "slack-api", "capacity": "50 req/min", "estimated_usage": "6 req/min" },
+    { "name": "listen-port", "port": 17382 }      #   daemons: port reclaimed before spawn
   ],
   "command": {                                  # required
     "mode": "shell",                            #   "shell" or "exec"
@@ -572,6 +607,10 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
 
     if args.cmd == "health":
         _cmd_health(args)
+        return
+
+    if args.cmd == "doctor":
+        _cmd_doctor(args)
         return
 
     if args.cmd == "timer":

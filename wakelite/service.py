@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -54,6 +56,10 @@ class CapacityExceededError(ValueError):
     pass
 
 
+class DeclaredPortHeldError(RuntimeError):
+    """A daemon's declared port is held by a process we must not kill."""
+
+
 class WakeLiteService:
     def __init__(self, tick_seconds: int = 15, max_workers: int = MAX_WORKERS) -> None:
         ensure_dirs()
@@ -67,7 +73,7 @@ class WakeLiteService:
         self._started_monotonic = time.monotonic()
         self.timer_store = TimerStore()
         self.state = StateStore()
-        self.notifier = Notifier()
+        self.notifier = Notifier(meta_store=self.state)
         self.notifier.muted = self.state.get_meta("notifications.muted", "false") == "true"
         self._stop = threading.Event()
         self._wake_event = threading.Event()
@@ -85,8 +91,105 @@ class WakeLiteService:
         # (no DNS right after a machine wake), so the daemon ghost check must
         # treat these as alive regardless of wall-clock grace.
         self._spawning_runs: set[str] = set()
+        # Cached answer of _network_ready(), refreshed once per tick.
+        self._network_ready_cache: Optional[bool] = None
 
     _MAX_SLEEP = 15.0  # seconds; caps idle sleep for heartbeat liveness
+
+    # How long after runner start a run may wait for the network to come up.
+    # A machine that just booted has no DNS for a few seconds; a runner that
+    # has been up for longer than this is in steady state and never waits.
+    BOOT_NETWORK_WINDOW_SECONDS = 300
+    NETWORK_WAIT_POLL_SECONDS = 5
+    NETWORK_WAIT_MAX_SECONDS = 120
+
+    def _network_ready(self, refresh: bool = False) -> bool:
+        """Report whether the machine has a usable network, without resolving a name.
+
+        Deliberately avoids getaddrinfo: an unresolvable name is exactly the
+        call that blocks for tens of seconds after a boot, so using it here
+        would reproduce the stall this probe exists to detect. `route` and
+        `scutil` both answer from the kernel/configd in about a millisecond.
+
+        Fails open — if neither tool answers, we report ready rather than
+        making every run wait on a probe we cannot trust.
+        """
+        forced_down = os.environ.get("WAKELITE_FORCE_NETWORK_DOWN", "").strip().lower()
+        if forced_down in ("1", "true", "yes", "on"):
+            return False
+
+        if not refresh and self._network_ready_cache is not None:
+            return self._network_ready_cache
+
+        ready = self._probe_network()
+        self._network_ready_cache = ready
+        return ready
+
+    def _probe_network(self) -> bool:
+        try:
+            route = subprocess.run(
+                ["route", "-n", "get", "default"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if route.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("route probe unavailable", exc_info=True)
+
+        try:
+            nwi = subprocess.run(
+                ["scutil", "--nwi"], capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("scutil probe unavailable", exc_info=True)
+            return True  # no probe answered — do not hold runs hostage
+
+        if nwi.returncode != 0:
+            return True
+        # "(Not Reachable)" also contains "Reachable", so match only the
+        # affirmative form.
+        return re.search(r"(?<!Not )Reachable\)", nwi.stdout or "") is not None
+
+    def _await_network_for_boot(self, timer_id: str, queued_reason: Optional[str]) -> None:
+        """Hold a run just before Popen while a freshly booted machine gets its network.
+
+        Only applies inside the boot window: after that a not-ready probe means
+        the machine is genuinely offline and delaying the command buys nothing.
+        A run-now outside that window is a person waiting at a terminal, so it
+        never waits.
+
+        The wait lives in the worker on purpose. Recording the run as `waiting`
+        (exit 75) instead would leave the occurrence `pending`, and _process_due
+        only scans occurrences between the last tick and now — a calendar timer
+        that reported "not ready" at boot would be skipped until its next
+        scheduled time, possibly the next day. For a daemon it would also double
+        the restart backoff.
+        """
+        uptime = time.monotonic() - self._started_monotonic
+        if uptime >= self.BOOT_NETWORK_WINDOW_SECONDS:
+            return
+        if self._network_ready():
+            return
+
+        waited = 0.0
+        while waited < self.NETWORK_WAIT_MAX_SECONDS:
+            if self._stop.is_set():
+                return
+            poll = min(self.NETWORK_WAIT_POLL_SECONDS, self.NETWORK_WAIT_MAX_SECONDS - waited)
+            if self._stop.wait(timeout=poll):
+                return
+            waited += poll
+            if self._network_ready(refresh=True):
+                logger.info(
+                    "Timer %s (%s): network came up after %.0fs at boot; starting command",
+                    timer_id, queued_reason or "scheduled", waited,
+                )
+                return
+
+        logger.warning(
+            "Timer %s (%s): network still not ready after %.0fs at boot; starting command anyway",
+            timer_id, queued_reason or "scheduled", waited,
+        )
 
     def _signal_wake(self) -> None:
         """Signal the scheduler thread to re-evaluate timer deadlines immediately."""
@@ -111,6 +214,11 @@ class WakeLiteService:
         return response
 
     def start(self) -> None:
+        # Must run before the loop below. set_runtime_idle() without a run_id
+        # deletes every active_runs row for the timer, and those rows carry the
+        # PIDs of children that outlived an unclean exit.
+        self._reclaim_orphaned_processes()
+
         recovered = self.state.recover_uncertain_runs()
         recovered_timer_ids: set[str] = set()
         for row in recovered:
@@ -151,10 +259,24 @@ class WakeLiteService:
             self._scheduler_thread.join(timeout=5)
         # Terminate all active processes (daemon and regular). Mark each run first
         # so the run thread reports "shutdown" rather than a spurious failure.
+        #
+        # Concurrently, because _terminate_process waits a full grace period for
+        # each child before escalating to SIGKILL. Sequentially that is
+        # len(children) * grace, and launchd SIGKILLs the runner once ExitTimeOut
+        # expires — killing it mid-teardown orphans every child not yet reached
+        # (start_new_session=True), which manufactures the orphans R1 reclaims.
+        # One grace period total keeps teardown inside the timeout.
         with self._run_lock:
-            for run_id, proc in list(self._active_processes.items()):
+            pending = list(self._active_processes.items())
+            for run_id, _ in pending:
                 self._shutdown_terminated.add(run_id)
-                self._terminate_process(proc)
+
+        if pending:
+            with ThreadPoolExecutor(
+                max_workers=len(pending), thread_name_prefix="wl-stop"
+            ) as stopper:
+                list(stopper.map(lambda item: self._terminate_process(item[1]), pending))
+
         self._executor.shutdown(wait=True, cancel_futures=True)
 
     def health(self) -> Dict[str, Any]:
@@ -755,10 +877,15 @@ class WakeLiteService:
         prune_counter = 0
         consecutive_errors = 0
 
+        # Recorded once, not per tick: `doctor` reads it to tell a daemon that
+        # is a child of the live runner from one orphaned by an earlier one.
+        self.state.set_meta("runner.pid", str(os.getpid()))
+
         while not self._stop.is_set():
             try:
                 self._wake_event.clear()
                 now = datetime.now()
+                self._network_ready_cache = None  # one probe per tick at most
                 self.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
 
                 # Fast tick: interval timers + daemon health (every wake)
@@ -778,6 +905,7 @@ class WakeLiteService:
                     prune_counter += 1
                     if prune_counter >= max(1, int(3600 / self.tick_seconds)):
                         self._prune()
+                        self._report_stalled_waits()
                         prune_counter = 0
 
                 if consecutive_errors > 0:
@@ -2175,6 +2303,32 @@ end tell'''],
         except Exception:
             logger.warning("Ghostty resume spawn failed for session %s", session_id, exc_info=True)
 
+    def _post_run_started(
+        self, timer: Dict[str, Any], run_id: str, scheduled_at: str
+    ) -> Optional[str]:
+        """Announce a started run on Slack and return the thread root, or None.
+
+        For timers not bound to a specific session, all notifications for this
+        run are grouped under one parent thread. Existing timers omit
+        slackActivity, so True is the compatibility default; explicit False
+        makes this entire lifecycle Slack-silent.
+        """
+        timer_id = timer["id"]
+        try:
+            timer_name = timer.get("name", timer_id)
+            slack_thread_ts = self.notifier.get_daily_thread_ts()
+            if slack_thread_ts:
+                self.notifier.notify_slack(
+                    f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
+                    f"Run: `{run_id}`\n"
+                    f"Scheduled: {scheduled_at}",
+                    thread_ts=slack_thread_ts,
+                )
+            return slack_thread_ts
+        except Exception:
+            logger.warning("Slack thread setup failed for timer %s; continuing", timer_id, exc_info=True)
+            return None
+
     def _run_occurrence(
         self,
         timer: Dict[str, Any],
@@ -2201,28 +2355,22 @@ end tell'''],
 
         notifications = timer.get("notifications") or {}
         slack_activity_enabled = notifications.get("slackActivity", True)
+        # A failure that keeps repeating is one story, not one story per run.
+        # Once the streak is established, the per-run Slack chatter is what
+        # buries everything else, so it goes quiet until the streak ends.
+        streak_open = self.state.get_runtime(timer_id).failure_streak >= self.STREAK_QUIET_FROM
 
-        # For timers not bound to a specific session, create a Slack thread
-        # so all notifications for this run are grouped under one parent.
-        # Existing timers omit slackActivity, so True is the compatibility
-        # default; explicit False makes this entire lifecycle Slack-silent.
+        # The "started" post happens after Popen — see _post_run_started. Its
+        # thread id is only consumed once proc.wait() returns, so nothing is
+        # lost by posting late, and the command no longer starts behind a
+        # network call that can stall for tens of seconds with no DNS.
         slack_thread_ts: Optional[str] = None
         callback = timer.get("callback") or {}
         session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
-        if slack_activity_enabled and not session_bound:
-            try:
-                timer_name = timer.get("name", timer_id)
-                slack_thread_ts = self.notifier.get_daily_thread_ts()
-                if slack_thread_ts:
-                    self.notifier.notify_slack(
-                        f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
-                        f"Run: `{run_id}`\n"
-                        f"Scheduled: {scheduled_at}",
-                        thread_ts=slack_thread_ts,
-                    )
-            except Exception:
-                slack_thread_ts = None
-                logger.warning("Slack thread setup failed for timer %s; continuing", timer_id, exc_info=True)
+        # R3 moved the started-post to after Popen so a stalled network cannot
+        # delay the spawn; R2 suppresses it while a failure streak is open.
+        # Both must hold: the post happens late AND not during a streak.
+        announce_start = slack_activity_enabled and not session_bound and not streak_open
 
         date_dir = datetime.now().strftime("%Y-%m-%d")
         run_dir = LOG_DIR / timer_id / date_dir
@@ -2233,6 +2381,11 @@ end tell'''],
         command = timer.get("command", {})
         env = os.environ.copy()
         env.update({k: str(v) for k, v in (command.get("env") or {}).items()})
+        # Identity markers for orphan reclaim. Set after the timer's own env so
+        # a timer cannot overwrite them. They survive exec and argv rewriting,
+        # which command-line matching does not.
+        env["WAKELITE_RUN_ID"] = run_id
+        env["WAKELITE_TIMER_ID"] = timer_id
         cwd = command.get("workingDirectory") or str(Path.home())
 
         status = "failed"
@@ -2252,10 +2405,17 @@ end tell'''],
                     exit_code = -15
                     message = "aborted by user"
                 else:
+                    if timer.get("timer_type") == "daemon":
+                        # Raises DeclaredPortHeldError, which the handler below
+                        # turns into a failed run rather than a hot restart loop.
+                        self._ensure_declared_ports_free(timer)
+
                     if command.get("mode") == "shell":
                         cmd = ["/bin/zsh", "-lc", command.get("shell", "")]
                     else:
                         cmd = [command.get("executable", "")] + list(command.get("args") or [])
+
+                    self._await_network_for_boot(timer_id, queued_reason)
 
                     proc = subprocess.Popen(
                         cmd,
@@ -2268,7 +2428,12 @@ end tell'''],
                     with self._run_lock:
                         self._active_processes[run_id] = proc
                         self._spawning_runs.discard(run_id)
-                    self.state.update_active_run_pid(run_id, proc.pid)
+                    self.state.update_active_run_pid(
+                        run_id, proc.pid, self._pid_start_time(proc.pid)
+                    )
+
+                    if announce_start:
+                        slack_thread_ts = self._post_run_started(timer, run_id, scheduled_at)
 
                     exit_code = proc.wait()
 
@@ -2379,6 +2544,7 @@ end tell'''],
                 return
             # Delete failed — fall through to normal post-run processing
 
+        streak_after = 0
         if status == "shutdown":
             # Planned teardown from stop(): no incident and no notification. The
             # run row already records it, and a runner restart is not an event
@@ -2386,31 +2552,62 @@ end tell'''],
             # source of self-inflicted run_failed noise.
             pass
         elif status not in ("success", "aborted", "waiting"):
-            self.state.add_incident(
+            streak = self.state.bump_failure_streak(timer_id, message)
+            streak_after = streak.failure_streak
+            # The incident message must not carry scheduled_at: it is the key
+            # repeats are folded onto, and a per-run key files a per-run row.
+            self.state.record_incident(
                 "error",
                 "run_failed",
-                f"Timer {timer_id} failed at {scheduled_at}: {message}",
+                f"Timer {timer_id} failed: {message}",
                 timer_id,
             )
-            if notify_on_failure:
+            if notify_on_failure and self._streak_alert_due(streak):
+                self.state.mark_streak_notified(timer_id, streak.failure_streak)
+                self._deliver_streak_alert(
+                    timer,
+                    kind="run_failed",
+                    streak=streak.failure_streak,
+                    title="WakeLite failure",
+                    body=self._streak_alert_body(timer, message, streak),
+                    slack_thread_ts=slack_thread_ts,
+                    slack_activity_enabled=slack_activity_enabled,
+                )
+        else:
+            recovered = False
+            if status == "success":
+                # Only a success ends a streak. A wait or an abort says nothing
+                # about whether the cause is gone.
+                ended = self.state.reset_failure_streak(timer_id)
+                recovered = ended.failure_streak >= self.STREAK_RECOVERY_FROM
+                if recovered:
+                    self._deliver_streak_alert(
+                        timer,
+                        kind="recovered",
+                        streak=ended.failure_streak,
+                        title="WakeLite recovered",
+                        body=(
+                            f"{timer.get('name', timer_id)} recovered after "
+                            f"{ended.failure_streak} failures ({ended.streak_message})"
+                        ),
+                        slack_thread_ts=slack_thread_ts,
+                        slack_activity_enabled=slack_activity_enabled,
+                    )
+            if notify_on_success and not recovered:
                 self.notifier.notify(
-                    "WakeLite failure",
-                    f"{timer.get('name', timer_id)} failed: {message}",
+                    "WakeLite success",
+                    f"{timer.get('name', timer_id)} completed at {scheduled_at}",
                     open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
                     group=f"wakelite-timer-{timer_id}",
                 )
-        elif notify_on_success:
-            self.notifier.notify(
-                "WakeLite success",
-                f"{timer.get('name', timer_id)} completed at {scheduled_at}",
-                open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
-                group=f"wakelite-timer-{timer_id}",
-            )
 
-        # Always close the Slack thread with a status reply (if we opened one).
-        # This is independent of macOS notification preferences — the thread parent
-        # already created the Slack "noise", so leaving it without a reply is worse.
-        if slack_thread_ts:
+        # Always close the Slack thread with a status reply (if we opened one),
+        # unless this run is one of a streak: the streak alert already says what
+        # is wrong, and a reply per repeat is the other half of the storm.
+        # Otherwise this is independent of macOS notification preferences — the
+        # thread parent already created the Slack "noise", so leaving it without
+        # a reply is worse.
+        if slack_thread_ts and streak_after < self.STREAK_QUIET_FROM:
             if status == "aborted":
                 emoji, label = ":stop_sign:", "Aborted"
             elif status == "shutdown":
@@ -2512,6 +2709,372 @@ end tell'''],
     # race its own daemon spawn and clear the runtime row before Popen happens.
     DAEMON_SPAWN_GRACE_SECONDS = 30
 
+    # Time an orphan gets between SIGTERM and SIGKILL during startup reclaim.
+    ORPHAN_RECLAIM_GRACE_SECONDS = 5.0
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)  # signal 0 = existence check
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists, we just may not signal it
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _ps_field(pid: int, fmt: str, *flags: str) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ["ps", *flags, "-o", fmt, "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    @classmethod
+    def _pid_start_time(cls, pid: int) -> Optional[str]:
+        """OS-reported process start time, e.g. 'Mon Sep  7 20:07:13 2026'."""
+        return cls._ps_field(pid, "lstart=")
+
+    @classmethod
+    def _pid_environ(cls, pid: int) -> Optional[str]:
+        return cls._ps_field(pid, "args=", "-E")
+
+    @staticmethod
+    def _boot_time() -> Optional[datetime]:
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "kern.boottime"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        match = re.search(r"sec\s*=\s*(\d+)", result.stdout)
+        if not match:
+            return None
+        try:
+            return datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_iso(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @classmethod
+    def _identify_orphan(
+        cls, pid: int, run_id: str, recorded_start: Optional[str]
+    ) -> Tuple[Optional[bool], str]:
+        """Decide whether `pid` is still the process we spawned for `run_id`.
+
+        Returns (verdict, evidence); a None verdict means "cannot tell", which
+        must be treated as "not ours" so we never signal a stranger.
+
+        Two proofs, because neither is available everywhere:
+
+        - The WAKELITE_RUN_ID env marker, the stronger proof: it names the exact
+          run. SIP hides the environment from `ps -E` for platform binaries only,
+          NOT from non-root callers generally. Measured on this machine: a
+          Homebrew-Python child exposes 144 env vars and the marker reads back
+          through the `zsh -lc 'exec ...'` spawn path, while `/bin/bash` and
+          `/bin/sleep` children expose none. So it fires for cmux-focus-server
+          and slack-agent, and never for claude-callout.
+        - The process start time recorded at spawn, the fallback that covers the
+          platform-binary children. A recycled PID belongs to a process that
+          started at a different instant.
+
+        Command-line matching is deliberately absent: the timer command is
+        `exec /opt/homebrew/bin/python3 <script>` while the live process reports
+        argv[0] as `/opt/homebrew/Cellar/python@3.14/.../Python`.
+        """
+        environ = cls._pid_environ(pid)
+        if environ and "WAKELITE_RUN_ID=" in environ:
+            if f"WAKELITE_RUN_ID={run_id}" in environ:
+                return True, "WAKELITE_RUN_ID env marker"
+            return False, "WAKELITE_RUN_ID env marker names a different run"
+
+        if not recorded_start:
+            return None, "no recorded process start time and no readable env marker"
+        observed_start = cls._pid_start_time(pid)
+        if not observed_start:
+            return None, "process start time unreadable"
+        if observed_start == recorded_start:
+            return True, f"process start time {observed_start}"
+        return False, f"process start time {observed_start} != recorded {recorded_start}"
+
+    @staticmethod
+    def _signal_orphan(pid: int, sig: int) -> bool:
+        # Children are spawned with start_new_session=True, so the PID is its own
+        # process-group leader and the group is entirely ours to signal.
+        try:
+            os.killpg(pid, sig)
+            return True
+        except OSError:
+            pass
+        try:
+            os.kill(pid, sig)
+            return True
+        except OSError:
+            return False
+
+    @classmethod
+    def _kill_orphan(cls, pid: int) -> bool:
+        """SIGTERM then SIGKILL. Returns True if the kill had to be forced.
+
+        The orphan was reparented to launchd when the previous runner died, so
+        there is no child to wait() on — liveness is polled instead.
+        """
+        if not cls._signal_orphan(pid, signal.SIGTERM):
+            return False
+        deadline = time.time() + cls.ORPHAN_RECLAIM_GRACE_SECONDS
+        while time.time() < deadline:
+            if not cls._pid_alive(pid):
+                return False
+            time.sleep(0.1)
+
+        cls._signal_orphan(pid, signal.SIGKILL)
+        deadline = time.time() + 2.0
+        while time.time() < deadline and cls._pid_alive(pid):
+            time.sleep(0.05)
+        return True
+
+    @staticmethod
+    def _declared_ports(timer: Dict[str, Any]) -> List[int]:
+        ports: List[int] = []
+        for res in timer.get("resources") or []:
+            if not isinstance(res, dict):
+                continue
+            port = res.get("port")
+            if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+                ports.append(port)
+        return ports
+
+    @staticmethod
+    def _port_is_free(port: int) -> bool:
+        # No SO_REUSEADDR: the point is to notice a live listener, and
+        # SO_REUSEADDR would let the bind succeed against one in TIME_WAIT.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError as exc:
+            return exc.errno not in (errno.EADDRINUSE, errno.EACCES)
+        finally:
+            sock.close()
+
+    @staticmethod
+    def _port_holder_pid(port: int) -> Optional[int]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        for token in result.stdout.split():
+            try:
+                return int(token)
+            except ValueError:
+                continue
+        return None
+
+    def _process_holds_timer_logs(self, pid: int, timer_id: str) -> bool:
+        """True if `pid` has a run log of `timer_id` open as one of its files.
+
+        A child inherits the run's stdout/stderr across exec, so this identifies
+        our own orphan even after its active_runs row was deleted — the case the
+        env marker cannot cover on a macOS that hides process environments.
+        The runner itself holds those same handles while a run is live, so its
+        own PID is excluded.
+        """
+        if pid == os.getpid():
+            return False
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return f"{LOG_DIR}/{timer_id}/" in result.stdout
+
+    def _port_holder_is_ours(self, pid: int, timer_id: str) -> Tuple[bool, str]:
+        """Ownership check for a process found by port, not by active_runs row.
+
+        The startup reclaim identifies a run; this identifies a timer, because
+        the holder is an earlier run of the same daemon and its active_runs row
+        is usually already gone.
+        """
+        environ = self._pid_environ(pid)
+        if environ and "WAKELITE_TIMER_ID=" in environ:
+            if f"WAKELITE_TIMER_ID={timer_id}" in environ:
+                return True, "WAKELITE_TIMER_ID env marker"
+            return False, "WAKELITE_TIMER_ID env marker names a different timer"
+        if self._process_holds_timer_logs(pid, timer_id):
+            return True, f"open run log of timer {timer_id}"
+        return False, "no WakeLite ownership evidence"
+
+    def _ensure_declared_ports_free(self, timer: Dict[str, Any]) -> None:
+        """Clear each declared port before a daemon spawns, or refuse to spawn.
+
+        Without this a daemon whose orphan escaped the startup reclaim burns its
+        whole restart budget on EADDRINUSE, which is how the 2026-09-07 incident
+        produced 37 consecutive failures.
+        """
+        timer_id = timer["id"]
+        for port in self._declared_ports(timer):
+            if self._port_is_free(port):
+                continue
+
+            holder = self._port_holder_pid(port)
+            if holder is None:
+                message = f"port {port} is in use and no listening holder could be identified"
+                self.state.add_incident("warn", "resource_held_by_foreign", f"Timer {timer_id} not spawned: {message}", timer_id)
+                raise DeclaredPortHeldError(message)
+
+            is_ours, evidence = self._port_holder_is_ours(holder, timer_id)
+            if not is_ours:
+                message = f"port {port} is held by foreign pid {holder} ({evidence})"
+                self.state.add_incident("warn", "resource_held_by_foreign", f"Timer {timer_id} not spawned: {message}", timer_id)
+                raise DeclaredPortHeldError(message)
+
+            forced = self._kill_orphan(holder)
+            logger.warning("Reclaimed port %s from orphaned pid %s of timer %s", port, holder, timer_id)
+            self.state.add_incident(
+                "warn",
+                "orphan_reclaimed",
+                f"Reclaimed port {port} from orphaned pid {holder} of timer {timer_id}; "
+                f"identified by {evidence}" + ("; required SIGKILL" if forced else ""),
+                timer_id,
+            )
+
+    def _reclaim_orphaned_processes(self) -> List[Dict[str, Any]]:
+        """Reclaim this runner's orphans at startup. See reclaim_orphans()."""
+        return self.reclaim_orphans_for_state(self.state)
+
+    @classmethod
+    def reclaim_orphans_for_state(cls, state: Any) -> List[Dict[str, Any]]:
+        """Kill children that outlived an unclean exit of a previous runner.
+
+        stop() terminates every child, but a SIGKILL or a power cut does not:
+        children are spawned with start_new_session=True and simply keep running.
+        The next runner then respawns them, and the survivor holds the port
+        against every restart — the 2026-09-07 cmux-focus-server incident.
+
+        Applies to all timer types. Two of the daemons declare no port at all, so
+        an orphan there runs silently alongside its replacement.
+        """
+        outcomes: List[Dict[str, Any]] = []
+        try:
+            rows = state.list_active_runs()
+        except Exception:
+            logger.warning("Orphan reclaim could not read active runs", exc_info=True)
+            return outcomes
+        if not rows:
+            return outcomes
+
+        boot_time = cls._boot_time()
+        for row in rows:
+            try:
+                outcomes.append(cls._reclaim_one_orphan(state, row, boot_time))
+            except Exception:
+                # One unreadable row must not stop the runner from starting.
+                logger.warning("Orphan reclaim failed for row %s", row, exc_info=True)
+                outcomes.append({
+                    "run_id": row.get("run_id"),
+                    "timer_id": row.get("timer_id"),
+                    "pid": row.get("pid"),
+                    "action": "error",
+                    "detail": "",
+                })
+        return outcomes
+
+    @classmethod
+    def _reclaim_one_orphan(
+        cls, state: Any, row: Dict[str, Any], boot_time: Optional[datetime]
+    ) -> Dict[str, Any]:
+        run_id = row.get("run_id")
+        timer_id = row.get("timer_id")
+        pid = row.get("pid")
+
+        def outcome(action: str, detail: str = "") -> Dict[str, Any]:
+            return {"run_id": run_id, "timer_id": timer_id, "pid": pid, "action": action, "detail": detail}
+
+        if not run_id or pid is None:
+            return outcome("no_pid")
+        pid = int(pid)
+
+        started_at = cls._parse_iso(row.get("started_at"))
+        if boot_time and started_at and started_at < boot_time:
+            # The machine rebooted since this run started, so nothing of it
+            # survives and the PID now certainly names something else.
+            logger.info("Orphan reclaim skipping run %s (pid %s): started before boot", run_id, pid)
+            return outcome("skipped_pre_boot")
+
+        if not cls._pid_alive(pid):
+            return outcome("dead")
+
+        is_ours, evidence = cls._identify_orphan(pid, run_id, row.get("pid_started_at"))
+
+        if is_ours is None:
+            state.add_incident(
+                "warn",
+                "orphan_unverified",
+                f"PID {pid} from run {run_id} of timer {timer_id} is alive but its identity "
+                f"could not be confirmed ({evidence}); left running",
+                timer_id,
+            )
+            return outcome("unverified", evidence)
+
+        if not is_ours:
+            state.add_incident(
+                "warn",
+                "pid_reused",
+                f"PID {pid} recorded for run {run_id} of timer {timer_id} now belongs to "
+                f"another process ({evidence}); left running",
+                timer_id,
+            )
+            return outcome("pid_reused", evidence)
+
+        forced = cls._kill_orphan(pid)
+        logger.warning(
+            "Reclaimed orphaned pid %s from timer %s (run %s, forced=%s)",
+            pid, timer_id, run_id, forced,
+        )
+        state.add_incident(
+            "warn",
+            "orphan_reclaimed",
+            f"Reclaimed orphaned pid {pid} from timer {timer_id} (run {run_id}) that "
+            f"outlived an unclean runner exit; identified by {evidence}"
+            + ("; required SIGKILL" if forced else ""),
+            timer_id,
+        )
+        return outcome("reclaimed", evidence)
+
     def _is_daemon_process_alive(self, timer_id: str, run_id: Optional[str]) -> bool:
         """Check if the daemon process is actually alive via in-memory dict or OS PID check."""
         with self._run_lock:
@@ -2524,13 +3087,7 @@ end tell'''],
         if run_id:
             pid = self.state.get_active_run_pid(run_id)
             if pid is not None:
-                try:
-                    os.kill(pid, 0)  # signal 0 = existence check
-                    return True
-                except ProcessLookupError:
-                    return False
-                except PermissionError:
-                    return True  # process exists but we can't signal it
+                return self._pid_alive(pid)
             run = self.state.get_run(run_id)
             if run:
                 started_iso = run.get("started_at") or run.get("created_at")
@@ -2711,6 +3268,105 @@ end tell'''],
             group="wakelite-digest",
         )
         self.state.set_meta("digest.last_day", day_key)
+
+    # Alert policy for a repeating failure. One root cause on 2026-09-07 sent
+    # 38 alerts and filed 38 incidents; these gates turn that into 3 alerts and
+    # one incident carrying a count.
+    STREAK_ALERT_POINTS = (1, 3, 10)
+    # Beyond the last gate, one alert per hour for as long as the streak runs.
+    STREAK_ALERT_INTERVAL_SECONDS = 3600
+    # A streak this long has already been alerted on, so the per-run Slack
+    # "started" and status posts stop until it ends.
+    STREAK_QUIET_FROM = 2
+    # Below this, a recovery message would be noisier than the failure was.
+    STREAK_RECOVERY_FROM = 3
+
+    def _streak_alert_due(self, runtime: Any) -> bool:
+        """Whether this failure is one the operator should hear about."""
+        streak = runtime.failure_streak
+        if streak <= 0:
+            return False
+        if streak in self.STREAK_ALERT_POINTS:
+            # Guards a replayed run: a gate already spent stays spent.
+            return streak > runtime.last_notified_streak
+        if streak < max(self.STREAK_ALERT_POINTS):
+            return False
+        last_notified = runtime.last_notified_at
+        if not last_notified:
+            return True
+        try:
+            sent_at = datetime.fromisoformat(str(last_notified).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - sent_at).total_seconds()
+        return elapsed >= self.STREAK_ALERT_INTERVAL_SECONDS
+
+    def _streak_alert_body(self, timer: Dict[str, Any], message: str, runtime: Any) -> str:
+        name = timer.get("name", timer["id"])
+        if runtime.failure_streak <= 1:
+            return f"{name} failed: {message}"
+        return (
+            f"{name} failed {runtime.failure_streak} times in a row: {message}"
+            f" (since {runtime.streak_started_at})"
+        )
+
+    def _deliver_streak_alert(
+        self,
+        timer: Dict[str, Any],
+        kind: str,
+        streak: int,
+        title: str,
+        body: str,
+        slack_thread_ts: Optional[str],
+        slack_activity_enabled: bool,
+    ) -> None:
+        """Deliver one streak alert to the desktop and to Slack, and count it."""
+        timer_id = timer["id"]
+        self.notifier.notify(
+            title,
+            body,
+            open_url=self.notifier.ui_url(f"#timer/{timer_id}"),
+            group=f"wakelite-timer-{timer_id}",
+        )
+        # Slack only hears about the alert once the streak has silenced the
+        # per-run posts. Below that the run's own status reply already carries
+        # the failure, and posting both would add a fourth Slack message to a
+        # single failed run — the opposite of the point.
+        if slack_activity_enabled and streak >= self.STREAK_QUIET_FROM:
+            emoji = ":white_check_mark:" if kind == "recovered" else ":rotating_light:"
+            thread_ts = slack_thread_ts
+            if thread_ts is None:
+                # The per-run thread was suppressed by the streak, so hang the
+                # alert off today's thread rather than posting at top level.
+                try:
+                    thread_ts = self.notifier.get_daily_thread_ts()
+                except Exception:
+                    thread_ts = None
+                    logger.warning("Slack thread lookup failed for streak alert on %s", timer_id, exc_info=True)
+            self.notifier.notify_slack(f"{emoji} *{title}*\n{body}", thread_ts=thread_ts)
+        self.notifier.log_sent(kind, timer_id, streak)
+
+    def _report_stalled_waits(self, hours: int = 24) -> int:
+        """File one info incident per timer that has been waiting for a day.
+
+        Exit 75 is a healthy "not yet", so it raises nothing per run. That is
+        also why a poller can wait for a month without anyone hearing: one
+        timer logged 1,238 waits in 30 days and reported none.
+        """
+        reported = 0
+        for stuck in self.state.stale_waiting_timers(hours):
+            timer = self.timer_store.get_timer(stuck["timer_id"])
+            name = timer.get("name", stuck["timer_id"]) if timer else stuck["timer_id"]
+            self.state.record_incident(
+                "info",
+                "waiting_stalled",
+                f"Timer {name} has been waiting since {stuck['first_wait']} without settling",
+                stuck["timer_id"],
+            )
+            reported += 1
+        return reported
 
     @staticmethod
     def _healthy_uptime_threshold(timer: Dict[str, Any]) -> float:
@@ -2976,3 +3632,18 @@ end tell'''],
             pass
 
         return forced_kill
+
+
+def reclaim_orphans(state: Any) -> List[Dict[str, Any]]:
+    """Reclaim children that outlived an unclean runner exit.
+
+    The entrypoint `wakelite.doctor` resolves by name (see
+    `doctor._resolve_orphan_reclaim`). It takes a bare state store rather than a
+    service because `doctor --fix` runs without a live runner — that is the whole
+    point of doctor, which must work when the runner is hung.
+
+    Same implementation the runner uses at startup, reached through
+    `WakeLiteService.reclaim_orphans_for_state`, so the scheduled path and the
+    manual path can never drift apart.
+    """
+    return WakeLiteService.reclaim_orphans_for_state(state)

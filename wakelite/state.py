@@ -21,6 +21,14 @@ class RuntimeState:
     running_run_id: Optional[str]
     last_processed_scheduled_at: Optional[str]
     running_count: int = 0
+    # Consecutive failures carrying the same message, and what has already been
+    # alerted on. This is what turns one root cause into one alert stream
+    # instead of one alert per run.
+    failure_streak: int = 0
+    streak_message: Optional[str] = None
+    streak_started_at: Optional[str] = None
+    last_notified_streak: int = 0
+    last_notified_at: Optional[str] = None
 
 
 @dataclass
@@ -177,11 +185,16 @@ class StateStore:
                     UNIQUE(timer_id, type)
                 );
 
+                -- pid_started_at is the OS-reported start time of the process
+                -- behind `pid`. It is the identity proof used by orphan reclaim
+                -- after an unclean runner exit: a recycled PID belongs to a
+                -- process with a different start time.
                 CREATE TABLE IF NOT EXISTS active_runs (
                     run_id TEXT PRIMARY KEY,
                     timer_id TEXT NOT NULL,
                     started_at TEXT NOT NULL,
-                    pid INTEGER
+                    pid INTEGER,
+                    pid_started_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_active_runs_timer
                 ON active_runs(timer_id);
@@ -207,9 +220,28 @@ class StateStore:
             rt_cols = [row["name"] for row in conn.execute("PRAGMA table_info(timer_runtime)").fetchall()]
             if "running_count" not in rt_cols:
                 conn.execute("ALTER TABLE timer_runtime ADD COLUMN running_count INTEGER NOT NULL DEFAULT 0")
+            if "failure_streak" not in rt_cols:
+                conn.execute("ALTER TABLE timer_runtime ADD COLUMN failure_streak INTEGER NOT NULL DEFAULT 0")
+            if "streak_message" not in rt_cols:
+                conn.execute("ALTER TABLE timer_runtime ADD COLUMN streak_message TEXT")
+            if "streak_started_at" not in rt_cols:
+                conn.execute("ALTER TABLE timer_runtime ADD COLUMN streak_started_at TEXT")
+            if "last_notified_streak" not in rt_cols:
+                conn.execute("ALTER TABLE timer_runtime ADD COLUMN last_notified_streak INTEGER NOT NULL DEFAULT 0")
+            # The streak gates are "1, 3, 10, then hourly", so the count alone
+            # cannot say whether the hourly allowance has been spent.
+            if "last_notified_at" not in rt_cols:
+                conn.execute("ALTER TABLE timer_runtime ADD COLUMN last_notified_at TEXT")
             inc_cols = [row["name"] for row in conn.execute("PRAGMA table_info(incidents)").fetchall()]
             if "ack_source" not in inc_cols:
                 conn.execute("ALTER TABLE incidents ADD COLUMN ack_source TEXT")
+            if "count" not in inc_cols:
+                conn.execute("ALTER TABLE incidents ADD COLUMN count INTEGER NOT NULL DEFAULT 1")
+            if "last_seen_at" not in inc_cols:
+                conn.execute("ALTER TABLE incidents ADD COLUMN last_seen_at TEXT")
+            ar_cols = [row["name"] for row in conn.execute("PRAGMA table_info(active_runs)").fetchall()]
+            if "pid_started_at" not in ar_cols:
+                conn.execute("ALTER TABLE active_runs ADD COLUMN pid_started_at TEXT")
 
     @staticmethod
     def _now() -> str:
@@ -279,6 +311,23 @@ class StateStore:
                 for row in rows
             ]
 
+    @staticmethod
+    def _runtime_from_row(row: sqlite3.Row) -> RuntimeState:
+        return RuntimeState(
+            timer_id=row["timer_id"],
+            is_running=bool(row["is_running"]),
+            queued_once=bool(row["queued_once"]),
+            queued_scheduled_at=row["queued_scheduled_at"],
+            running_run_id=row["running_run_id"],
+            last_processed_scheduled_at=row["last_processed_scheduled_at"],
+            running_count=int(row["running_count"]) if row["running_count"] else 0,
+            failure_streak=int(row["failure_streak"]) if row["failure_streak"] else 0,
+            streak_message=row["streak_message"],
+            streak_started_at=row["streak_started_at"],
+            last_notified_streak=int(row["last_notified_streak"]) if row["last_notified_streak"] else 0,
+            last_notified_at=row["last_notified_at"],
+        )
+
     def get_runtime(self, timer_id: str) -> RuntimeState:
         with self._lock:
             conn = self._connect()
@@ -291,15 +340,7 @@ class StateStore:
                     (timer_id,),
                 )
                 return RuntimeState(timer_id, False, False, None, None, None, 0)
-            return RuntimeState(
-                timer_id=row["timer_id"],
-                is_running=bool(row["is_running"]),
-                queued_once=bool(row["queued_once"]),
-                queued_scheduled_at=row["queued_scheduled_at"],
-                running_run_id=row["running_run_id"],
-                last_processed_scheduled_at=row["last_processed_scheduled_at"],
-                running_count=int(row["running_count"]) if row["running_count"] else 0,
-            )
+            return self._runtime_from_row(row)
 
     def set_runtime_running(self, timer_id: str, run_id: str, scheduled_at: str, pid: Optional[int] = None) -> None:
         with self._lock:
@@ -352,26 +393,126 @@ class StateStore:
                     (timer_id,),
                 )
                 return RuntimeState(timer_id=timer_id, is_running=False, queued_once=False, queued_scheduled_at=None, running_run_id=None, last_processed_scheduled_at=None, running_count=0)
-            return RuntimeState(
-                timer_id=row["timer_id"],
-                is_running=bool(row["is_running"]),
-                queued_once=bool(row["queued_once"]),
-                queued_scheduled_at=row["queued_scheduled_at"],
-                running_run_id=row["running_run_id"],
-                last_processed_scheduled_at=row["last_processed_scheduled_at"],
-                running_count=int(row["running_count"]) if row["running_count"] else 0,
-            )
+            return self._runtime_from_row(row)
 
-    def update_active_run_pid(self, run_id: str, pid: int) -> None:
+    # ----- failure streaks -------------------------------------------
+
+    def bump_failure_streak(self, timer_id: str, message: str) -> RuntimeState:
+        """Count this failure, and return the streak it belongs to.
+
+        A failure carrying a different message than the open streak starts a
+        new one: two different causes are two problems, and folding them
+        together would hide the second behind the first one's spent alerts.
+        """
+        now = self._now()
         with self._lock:
             conn = self._connect()
-            conn.execute("UPDATE active_runs SET pid = ? WHERE run_id = ?", (pid, run_id))
+            self.get_runtime(timer_id)  # ensures the row exists
+            row = conn.execute(
+                "SELECT failure_streak, streak_message FROM timer_runtime WHERE timer_id = ?",
+                (timer_id,),
+            ).fetchone()
+            same_cause = bool(row["failure_streak"]) and row["streak_message"] == message
+            if same_cause:
+                conn.execute(
+                    "UPDATE timer_runtime SET failure_streak = failure_streak + 1 WHERE timer_id = ?",
+                    (timer_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE timer_runtime SET failure_streak = 1, streak_message = ?,"
+                    " streak_started_at = ?, last_notified_streak = 0, last_notified_at = NULL"
+                    " WHERE timer_id = ?",
+                    (message, now, timer_id),
+                )
+            return self.get_runtime(timer_id)
+
+    def reset_failure_streak(self, timer_id: str) -> RuntimeState:
+        """Close any open streak, returning the state as it was before."""
+        with self._lock:
+            conn = self._connect()
+            previous = self.get_runtime(timer_id)
+            if previous.failure_streak == 0 and previous.streak_message is None:
+                return previous
+            conn.execute(
+                "UPDATE timer_runtime SET failure_streak = 0, streak_message = NULL,"
+                " streak_started_at = NULL, last_notified_streak = 0, last_notified_at = NULL"
+                " WHERE timer_id = ?",
+                (timer_id,),
+            )
+            return previous
+
+    def mark_streak_notified(self, timer_id: str, streak: int) -> None:
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "UPDATE timer_runtime SET last_notified_streak = ?, last_notified_at = ? WHERE timer_id = ?",
+                (int(streak), self._now(), timer_id),
+            )
+
+    def stale_waiting_timers(self, hours: int = 24) -> List[Dict[str, Any]]:
+        """Timers stuck in `waiting` (exit 75) for longer than `hours`.
+
+        A wait is a legitimate answer, so it raises nothing on its own. A wait
+        that has not resolved in a day is a poller nobody is being told about:
+        mcp-feature-catalog-protocol-health logged 1,238 of them in 30 days and
+        reported none. A timer counts as stuck only when nothing has settled
+        since the wait began, so an intermittent poller stays quiet.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                """
+                SELECT timer_id,
+                       SUM(status = 'waiting') AS waits,
+                       MIN(CASE WHEN status = 'waiting' THEN created_at END) AS first_wait,
+                       MAX(CASE WHEN status = 'waiting' THEN created_at END) AS last_wait,
+                       MAX(CASE WHEN status NOT IN ('waiting', 'started') THEN created_at END) AS last_settled
+                FROM run_history
+                GROUP BY timer_id
+                """
+            ).fetchall()
+
+        stuck: List[Dict[str, Any]] = []
+        for row in rows:
+            first_wait = row["first_wait"]
+            if not row["waits"] or not first_wait or first_wait >= cutoff:
+                continue
+            last_settled = row["last_settled"]
+            if last_settled and last_settled > first_wait:
+                continue
+            stuck.append(
+                {
+                    "timer_id": row["timer_id"],
+                    "waits": int(row["waits"]),
+                    "first_wait": first_wait,
+                    "last_wait": row["last_wait"],
+                }
+            )
+        return stuck
+
+    def update_active_run_pid(self, run_id: str, pid: int, pid_started_at: Optional[str] = None) -> None:
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "UPDATE active_runs SET pid = ?, pid_started_at = ? WHERE run_id = ?",
+                (pid, pid_started_at, run_id),
+            )
 
     def get_active_run_pid(self, run_id: str) -> Optional[int]:
         with self._lock:
             conn = self._connect()
             row = conn.execute("SELECT pid FROM active_runs WHERE run_id = ?", (run_id,)).fetchone()
             return int(row["pid"]) if row and row["pid"] is not None else None
+
+    def list_active_runs(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT run_id, timer_id, started_at, pid, pid_started_at FROM active_runs ORDER BY started_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def get_active_runs_for_timer(self, timer_id: str) -> list:
         with self._lock:
@@ -742,15 +883,58 @@ class StateStore:
                 # it never re-inflates the unacknowledged counter.
                 cursor = conn.execute(
                     "INSERT INTO incidents(created_at, severity, type, timer_id, message,"
-                    " acknowledged, acked_at, ack_source) VALUES(?, ?, ?, ?, ?, 1, ?, ?)",
-                    (now, severity, incident_type, timer_id, message, now, f"mute:{muted['id']}"),
+                    " acknowledged, acked_at, ack_source, count, last_seen_at)"
+                    " VALUES(?, ?, ?, ?, ?, 1, ?, ?, 1, ?)",
+                    (now, severity, incident_type, timer_id, message, now, f"mute:{muted['id']}", now),
                 )
             else:
                 cursor = conn.execute(
-                    "INSERT INTO incidents(created_at, severity, type, timer_id, message) VALUES(?, ?, ?, ?, ?)",
-                    (now, severity, incident_type, timer_id, message),
+                    "INSERT INTO incidents(created_at, severity, type, timer_id, message,"
+                    " count, last_seen_at) VALUES(?, ?, ?, ?, ?, 1, ?)",
+                    (now, severity, incident_type, timer_id, message, now),
                 )
             return int(cursor.lastrowid)
+
+    def bump_incident(
+        self, timer_id: Optional[str], incident_type: str, message: str
+    ) -> Optional[int]:
+        """Fold a repeat into the incident already filed for this cause.
+
+        Returns the row that absorbed the repeat, or None when nothing matches
+        and the caller should file a fresh incident. A mute-acknowledged row
+        still counts as open: pre-acking is how a mute keeps the counter clean,
+        and treating it as closed would file one row per repeat — the storm
+        this exists to collapse.
+        """
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                """
+                SELECT id FROM incidents
+                WHERE type = ? AND message = ?
+                  AND ((timer_id IS NULL AND ? IS NULL) OR timer_id = ?)
+                  AND (acknowledged = 0 OR ack_source LIKE 'mute:%')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (incident_type, message, timer_id, timer_id),
+            ).fetchone()
+            if not row:
+                return None
+            incident_id = int(row["id"])
+            conn.execute(
+                "UPDATE incidents SET count = count + 1, last_seen_at = ? WHERE id = ?",
+                (self._now(), incident_id),
+            )
+            return incident_id
+
+    def record_incident(
+        self, severity: str, incident_type: str, message: str, timer_id: Optional[str] = None
+    ) -> int:
+        """File this cause once, then count every repeat against that row."""
+        existing = self.bump_incident(timer_id, incident_type, message)
+        if existing is not None:
+            return existing
+        return self.add_incident(severity, incident_type, message, timer_id)
 
     def list_incidents(
         self,
