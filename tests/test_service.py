@@ -4969,6 +4969,69 @@ class WatchdogTests(unittest.TestCase):
         self.assertFalse(parsed.get("RunAtLoad", False), "watchdog must not kick at load")
 
 
+class LaunchdInstallSubstitutionTests(unittest.TestCase):
+    """`launchd install` must write REAL paths, and must install every agent.
+
+    Found live on 2026-09-07: install_user() did a verbatim shutil.copy2 of the
+    template, so the installed plist kept its `/path/to/wakelite` placeholders.
+    The running process is unaffected — launchd only reads the plist when it
+    next starts the job — so this is silent until a restart, at which point the
+    runner cannot start at all.
+    """
+
+    def _install(self, home: Path):
+        """Reload INSIDE the patch: the module computes its target paths at
+        import time, so patching after a reload leaves them pointing at the
+        real ~/Library/LaunchAgents — which the test would then overwrite."""
+        import wakelite.launchd_install as li
+
+        with patch.object(Path, "home", staticmethod(lambda: home)):
+            importlib.reload(li)
+            try:
+                result = li.install_user(load=False)
+            finally:
+                pass
+        importlib.reload(li)  # restore real paths for anything that follows
+        return li, result
+
+    def test_installed_runner_plist_has_no_placeholders(self):
+        import plistlib
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            li, _ = self._install(home)
+            target = home / "Library" / "LaunchAgents" / "com.wakelite.runner.plist"
+            self.assertTrue(target.exists(), "runner plist was not installed")
+
+            raw = target.read_text()
+            self.assertNotIn(
+                "/path/to", raw,
+                "installed runner plist still contains template placeholders, so launchd "
+                "cannot start the job",
+            )
+            parsed = plistlib.loads(target.read_bytes())
+            self.assertTrue(Path(parsed["ProgramArguments"][0]).exists(),
+                            f"runner executable does not exist: {parsed['ProgramArguments'][0]}")
+            self.assertEqual(parsed.get("ExitTimeOut"), 60)
+
+    def test_install_also_installs_the_watchdog_agent(self):
+        import plistlib
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            li, _ = self._install(home)
+            target = home / "Library" / "LaunchAgents" / "com.wakelite.watchdog.plist"
+            self.assertTrue(
+                target.exists(),
+                "watchdog agent was never installed, so nothing supervises the runner",
+            )
+            raw = target.read_text()
+            self.assertNotIn("/path/to", raw, "installed watchdog plist keeps placeholders")
+            parsed = plistlib.loads(target.read_bytes())
+            self.assertTrue(Path(parsed["ProgramArguments"][0]).exists())
+            self.assertIn("--watchdog", parsed["ProgramArguments"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

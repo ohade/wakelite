@@ -28,13 +28,43 @@ def _run(cmd: list[str]) -> Dict:
     }
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _render(template: Path) -> str:
+    """Substitute the template placeholders with this machine's real paths.
+
+    The templates ship with `/path/to/...` so they are readable in the repo.
+    install_user() used to copy them verbatim, which produced an installed plist
+    launchd could not run — and silently, because launchd only reads the plist
+    when it next starts the job, so the damage surfaced at the next restart
+    rather than at install time.
+    """
+    return (
+        template.read_text()
+        .replace("/path/to/wakelite", str(REPO_ROOT))
+        .replace("/path/to/home", str(Path.home()))
+    )
+
+
+def _write_agent(template: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_render(template))
+
+
 def install_user(load: bool = False) -> Dict:
-    USER_TARGET.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(USER_TEMPLATE, USER_TARGET)
-    result = {"installed": str(USER_TARGET)}
+    _write_agent(USER_TEMPLATE, USER_TARGET)
+    _write_agent(WATCHDOG_TEMPLATE, WATCHDOG_TARGET)
+    result = {"installed": str(USER_TARGET), "installed_watchdog": str(WATCHDOG_TARGET)}
     if load:
         result["bootout"] = _run(["launchctl", "bootout", f"gui/{_uid()}", str(USER_TARGET)])
         result["bootstrap"] = _run(["launchctl", "bootstrap", f"gui/{_uid()}", str(USER_TARGET)])
+        result["watchdog_bootout"] = _run(
+            ["launchctl", "bootout", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
+        )
+        result["watchdog_bootstrap"] = _run(
+            ["launchctl", "bootstrap", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
+        )
     return result
 
 
@@ -42,9 +72,15 @@ def uninstall_user(unload: bool = False) -> Dict:
     result = {"removed": False, "path": str(USER_TARGET)}
     if unload:
         result["bootout"] = _run(["launchctl", "bootout", f"gui/{_uid()}", str(USER_TARGET)])
+        result["watchdog_bootout"] = _run(
+            ["launchctl", "bootout", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
+        )
     if USER_TARGET.exists():
         USER_TARGET.unlink()
         result["removed"] = True
+    if WATCHDOG_TARGET.exists():
+        WATCHDOG_TARGET.unlink()
+        result["removed_watchdog"] = True
     return result
 
 
