@@ -3596,5 +3596,205 @@ class DaemonSpawnStallTests(unittest.TestCase):
                 worker.join(timeout=10)
 
 
+class NetworkSpawnTests(unittest.TestCase):
+    """A slow or absent network must never delay or strand a run.
+
+    Regression for 2026-09-07: the pre-spawn Slack post sat between the run row
+    and Popen. Right after a boot there was no DNS, urlopen's timeout does not
+    bound getaddrinfo, and the call stalled ~35s — pushing Popen past the daemon
+    ghost window and leaving an untracked server holding the port.
+    """
+
+    def _wait_for_run_id(self, svc, timer_id: str, timeout: float = 5.0) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            run_id = svc.state.get_runtime(timer_id).running_run_id
+            if run_id:
+                return run_id
+            time.sleep(0.01)
+        self.fail("run row was never created")
+
+    def _occurrence_status(self, svc, timer_id: str, scheduled_at: str) -> Optional[str]:
+        with svc.state._lock:
+            row = svc.state._connect().execute(
+                "SELECT status FROM occurrences WHERE timer_id = ? AND scheduled_at = ?",
+                (timer_id, scheduled_at),
+            ).fetchone()
+        return row["status"] if row else None
+
+    def test_stalled_slack_does_not_delay_popen(self):
+        """With the notifier stalled 5s, the command still starts within half a second."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-stalled-notifier", shell="sleep 30")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            stall_seconds = 5.0
+            stalling = threading.Event()
+            stalling.set()
+
+            def _stall() -> None:
+                if stalling.is_set():
+                    time.sleep(stall_seconds)
+
+            def _stalling_daily_thread_ts():
+                _stall()
+                return "fake-thread-ts"
+
+            def _stalling_notify_slack(*_args, **_kwargs):
+                _stall()
+                return "fake-ts-1234"
+
+            svc.notifier.get_daily_thread_ts = _stalling_daily_thread_ts
+            svc.notifier.notify_slack = _stalling_notify_slack
+
+            started_at = time.monotonic()
+            worker = threading.Thread(
+                target=svc._run_occurrence,
+                args=(timer, scheduled_at, False, None, None),
+                daemon=True,
+            )
+            worker.start()
+            run_id = None
+            try:
+                deadline = time.monotonic() + stall_seconds + 10
+                spawn_latency = None
+                while time.monotonic() < deadline:
+                    candidate = svc.state.get_runtime(timer_id).running_run_id
+                    if candidate and candidate in svc._active_processes:
+                        run_id = candidate
+                        spawn_latency = time.monotonic() - started_at
+                        break
+                    time.sleep(0.01)
+                self.assertIsNotNone(spawn_latency, "the command never reached Popen")
+                self.assertLess(
+                    spawn_latency,
+                    1.5,
+                    f"Popen waited {spawn_latency:.1f}s on the notifier "
+                    f"(notifier stalled {stall_seconds:.0f}s); it must not sit behind a network call",
+                )
+            finally:
+                stalling.clear()
+                proc = svc._active_processes.get(run_id) if run_id else None
+                if proc is not None:
+                    proc.terminate()
+                worker.join(timeout=20)
+
+    def test_network_probe_never_resolves_a_name(self):
+        """_network_ready must not call getaddrinfo — that is the call that blocks."""
+        import socket
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+
+            def _forbidden(*_args, **_kwargs):
+                raise AssertionError("_network_ready resolved a name")
+
+            with patch.object(socket, "getaddrinfo", _forbidden):
+                started_at = time.monotonic()
+                ready = svc._network_ready()
+                elapsed = time.monotonic() - started_at
+            self.assertIsInstance(ready, bool)
+            self.assertLess(elapsed, 2.0, "the readiness probe must be near-instant")
+
+            os.environ["WAKELITE_FORCE_NETWORK_DOWN"] = "1"
+            try:
+                self.assertFalse(
+                    svc._network_ready(refresh=True),
+                    "WAKELITE_FORCE_NETWORK_DOWN must force the probe to report not ready",
+                )
+            finally:
+                os.environ.pop("WAKELITE_FORCE_NETWORK_DOWN", None)
+
+    def test_run_waits_for_network_in_boot_window_then_spawns(self):
+        """Inside the boot window a not-ready network defers Popen, then the run executes."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            marker = Path(td) / "network-wait-marker"
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-boot-wait", shell=f"touch {marker}")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            probe_calls: list[float] = []
+            lock = threading.Lock()
+
+            def _probe(*_args, **_kwargs) -> bool:
+                with lock:
+                    probe_calls.append(time.monotonic())
+                    return len(probe_calls) > 2
+
+            svc._network_ready = _probe
+            svc._started_monotonic = time.monotonic()  # inside the boot window
+
+            started_at = time.monotonic()
+            with patch.object(svc, "NETWORK_WAIT_POLL_SECONDS", 0.2):
+                svc._run_occurrence(timer, scheduled_at, False, None, None)
+            elapsed = time.monotonic() - started_at
+
+            self.assertGreaterEqual(
+                len(probe_calls), 2, "the run never polled the network readiness probe"
+            )
+            self.assertGreaterEqual(
+                elapsed, 0.2, "the run did not wait at least one poll interval for the network"
+            )
+            self.assertLess(elapsed, 15.0, "the run waited far longer than the poll it needed")
+            self.assertTrue(marker.exists(), "the command never ran")
+
+            run_id = svc.state.list_runs(limit=1, timer_id=timer_id)[0]["run_id"]
+            self.assertEqual(svc.state.get_run(run_id)["status"], "success")
+            self.assertEqual(
+                self._occurrence_status(svc, timer_id, scheduled_at),
+                "success",
+                "the network path must not leave the occurrence pending — a pending "
+                "occurrence is skipped by _process_due until the next scheduled time",
+            )
+
+    def test_run_now_outside_boot_window_does_not_wait(self):
+        """A human run-now long after boot must not sit through the boot-window wait."""
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            marker = Path(td) / "run-now-marker"
+            timer = svc.timer_store.create_timer(
+                _basic_timer("network-run-now", shell=f"touch {marker}")
+            )
+            timer_id = timer["id"]
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer_id, scheduled_at, False)
+
+            svc._started_monotonic = time.monotonic() - 3600  # long past the boot window
+            os.environ["WAKELITE_FORCE_NETWORK_DOWN"] = "1"
+            try:
+                started_at = time.monotonic()
+                svc._run_occurrence(timer, scheduled_at, False, "run_now", None)
+                elapsed = time.monotonic() - started_at
+            finally:
+                os.environ.pop("WAKELITE_FORCE_NETWORK_DOWN", None)
+
+            self.assertLess(
+                elapsed, 3.0, f"run-now waited {elapsed:.1f}s on a network it does not need"
+            )
+            self.assertTrue(marker.exists(), "the command never ran")
+            run_id = svc.state.list_runs(limit=1, timer_id=timer_id)[0]["run_id"]
+            self.assertEqual(svc.state.get_run(run_id)["status"], "success")
+            self.assertEqual(
+                self._occurrence_status(svc, timer_id, scheduled_at), "success"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

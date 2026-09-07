@@ -85,8 +85,105 @@ class WakeLiteService:
         # (no DNS right after a machine wake), so the daemon ghost check must
         # treat these as alive regardless of wall-clock grace.
         self._spawning_runs: set[str] = set()
+        # Cached answer of _network_ready(), refreshed once per tick.
+        self._network_ready_cache: Optional[bool] = None
 
     _MAX_SLEEP = 15.0  # seconds; caps idle sleep for heartbeat liveness
+
+    # How long after runner start a run may wait for the network to come up.
+    # A machine that just booted has no DNS for a few seconds; a runner that
+    # has been up for longer than this is in steady state and never waits.
+    BOOT_NETWORK_WINDOW_SECONDS = 300
+    NETWORK_WAIT_POLL_SECONDS = 5
+    NETWORK_WAIT_MAX_SECONDS = 120
+
+    def _network_ready(self, refresh: bool = False) -> bool:
+        """Report whether the machine has a usable network, without resolving a name.
+
+        Deliberately avoids getaddrinfo: an unresolvable name is exactly the
+        call that blocks for tens of seconds after a boot, so using it here
+        would reproduce the stall this probe exists to detect. `route` and
+        `scutil` both answer from the kernel/configd in about a millisecond.
+
+        Fails open — if neither tool answers, we report ready rather than
+        making every run wait on a probe we cannot trust.
+        """
+        forced_down = os.environ.get("WAKELITE_FORCE_NETWORK_DOWN", "").strip().lower()
+        if forced_down in ("1", "true", "yes", "on"):
+            return False
+
+        if not refresh and self._network_ready_cache is not None:
+            return self._network_ready_cache
+
+        ready = self._probe_network()
+        self._network_ready_cache = ready
+        return ready
+
+    def _probe_network(self) -> bool:
+        try:
+            route = subprocess.run(
+                ["route", "-n", "get", "default"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if route.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("route probe unavailable", exc_info=True)
+
+        try:
+            nwi = subprocess.run(
+                ["scutil", "--nwi"], capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("scutil probe unavailable", exc_info=True)
+            return True  # no probe answered — do not hold runs hostage
+
+        if nwi.returncode != 0:
+            return True
+        # "(Not Reachable)" also contains "Reachable", so match only the
+        # affirmative form.
+        return re.search(r"(?<!Not )Reachable\)", nwi.stdout or "") is not None
+
+    def _await_network_for_boot(self, timer_id: str, queued_reason: Optional[str]) -> None:
+        """Hold a run just before Popen while a freshly booted machine gets its network.
+
+        Only applies inside the boot window: after that a not-ready probe means
+        the machine is genuinely offline and delaying the command buys nothing.
+        A run-now outside that window is a person waiting at a terminal, so it
+        never waits.
+
+        The wait lives in the worker on purpose. Recording the run as `waiting`
+        (exit 75) instead would leave the occurrence `pending`, and _process_due
+        only scans occurrences between the last tick and now — a calendar timer
+        that reported "not ready" at boot would be skipped until its next
+        scheduled time, possibly the next day. For a daemon it would also double
+        the restart backoff.
+        """
+        uptime = time.monotonic() - self._started_monotonic
+        if uptime >= self.BOOT_NETWORK_WINDOW_SECONDS:
+            return
+        if self._network_ready():
+            return
+
+        waited = 0.0
+        while waited < self.NETWORK_WAIT_MAX_SECONDS:
+            if self._stop.is_set():
+                return
+            poll = min(self.NETWORK_WAIT_POLL_SECONDS, self.NETWORK_WAIT_MAX_SECONDS - waited)
+            if self._stop.wait(timeout=poll):
+                return
+            waited += poll
+            if self._network_ready(refresh=True):
+                logger.info(
+                    "Timer %s (%s): network came up after %.0fs at boot; starting command",
+                    timer_id, queued_reason or "scheduled", waited,
+                )
+                return
+
+        logger.warning(
+            "Timer %s (%s): network still not ready after %.0fs at boot; starting command anyway",
+            timer_id, queued_reason or "scheduled", waited,
+        )
 
     def _signal_wake(self) -> None:
         """Signal the scheduler thread to re-evaluate timer deadlines immediately."""
@@ -759,6 +856,7 @@ class WakeLiteService:
             try:
                 self._wake_event.clear()
                 now = datetime.now()
+                self._network_ready_cache = None  # one probe per tick at most
                 self.state.set_meta("runner.heartbeat", datetime.now(timezone.utc).isoformat())
 
                 # Fast tick: interval timers + daemon health (every wake)
@@ -2175,6 +2273,32 @@ end tell'''],
         except Exception:
             logger.warning("Ghostty resume spawn failed for session %s", session_id, exc_info=True)
 
+    def _post_run_started(
+        self, timer: Dict[str, Any], run_id: str, scheduled_at: str
+    ) -> Optional[str]:
+        """Announce a started run on Slack and return the thread root, or None.
+
+        For timers not bound to a specific session, all notifications for this
+        run are grouped under one parent thread. Existing timers omit
+        slackActivity, so True is the compatibility default; explicit False
+        makes this entire lifecycle Slack-silent.
+        """
+        timer_id = timer["id"]
+        try:
+            timer_name = timer.get("name", timer_id)
+            slack_thread_ts = self.notifier.get_daily_thread_ts()
+            if slack_thread_ts:
+                self.notifier.notify_slack(
+                    f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
+                    f"Run: `{run_id}`\n"
+                    f"Scheduled: {scheduled_at}",
+                    thread_ts=slack_thread_ts,
+                )
+            return slack_thread_ts
+        except Exception:
+            logger.warning("Slack thread setup failed for timer %s; continuing", timer_id, exc_info=True)
+            return None
+
     def _run_occurrence(
         self,
         timer: Dict[str, Any],
@@ -2202,27 +2326,14 @@ end tell'''],
         notifications = timer.get("notifications") or {}
         slack_activity_enabled = notifications.get("slackActivity", True)
 
-        # For timers not bound to a specific session, create a Slack thread
-        # so all notifications for this run are grouped under one parent.
-        # Existing timers omit slackActivity, so True is the compatibility
-        # default; explicit False makes this entire lifecycle Slack-silent.
+        # The "started" post happens after Popen — see _post_run_started. Its
+        # thread id is only consumed once proc.wait() returns, so nothing is
+        # lost by posting late, and the command no longer starts behind a
+        # network call that can stall for tens of seconds with no DNS.
         slack_thread_ts: Optional[str] = None
         callback = timer.get("callback") or {}
         session_bound = callback.get("type") in ("wezterm", "ghostty", "cmux") and bool(callback.get("session_id"))
-        if slack_activity_enabled and not session_bound:
-            try:
-                timer_name = timer.get("name", timer_id)
-                slack_thread_ts = self.notifier.get_daily_thread_ts()
-                if slack_thread_ts:
-                    self.notifier.notify_slack(
-                        f":hourglass_flowing_sand: Timer *{timer_name}* started\n"
-                        f"Run: `{run_id}`\n"
-                        f"Scheduled: {scheduled_at}",
-                        thread_ts=slack_thread_ts,
-                    )
-            except Exception:
-                slack_thread_ts = None
-                logger.warning("Slack thread setup failed for timer %s; continuing", timer_id, exc_info=True)
+        announce_start = slack_activity_enabled and not session_bound
 
         date_dir = datetime.now().strftime("%Y-%m-%d")
         run_dir = LOG_DIR / timer_id / date_dir
@@ -2257,6 +2368,8 @@ end tell'''],
                     else:
                         cmd = [command.get("executable", "")] + list(command.get("args") or [])
 
+                    self._await_network_for_boot(timer_id, queued_reason)
+
                     proc = subprocess.Popen(
                         cmd,
                         stdout=out,
@@ -2269,6 +2382,9 @@ end tell'''],
                         self._active_processes[run_id] = proc
                         self._spawning_runs.discard(run_id)
                     self.state.update_active_run_pid(run_id, proc.pid)
+
+                    if announce_start:
+                        slack_thread_ts = self._post_run_started(timer, run_id, scheduled_at)
 
                     exit_code = proc.wait()
 

@@ -173,6 +173,23 @@ fall back to defaults):
 Bucket arithmetic uses `.timestamp()` on datetimes so DST transitions
 don't skew the 7-day axis.
 
+## Boot-window network wait
+
+`_run_occurrence` starts the process first and posts "timer started" to Slack
+afterwards, so a stalled network can no longer delay `Popen`. On top of that,
+when the runner has been up for less than `BOOT_NETWORK_WINDOW_SECONDS` (300)
+and `_network_ready()` is false, the worker polls every
+`NETWORK_WAIT_POLL_SECONDS` (5) for at most `NETWORK_WAIT_MAX_SECONDS` (120)
+before starting the command anyway.
+
+`_network_ready()` never resolves a name — `getaddrinfo` is the call that blocks
+for tens of seconds after a boot. It shells out to `route -n get default`, then
+`scutil --nwi`, both of which answer in about a millisecond, and fails open if
+neither answers. The result is cached for one scheduler tick.
+
+Set `WAKELITE_FORCE_NETWORK_DOWN=1` to make the probe report "not ready" without
+touching the machine's real networking — this is how the wait is verified live.
+
 ## Key gotchas
 
 - **Shell-mode timers run under `/bin/zsh -lc`; `status` is a read-only zsh special parameter.** Never write `status=$(...)` in a timer command; use a specific name such as `build_status`. Observed 2026-08-02: a long-lived polling timer repeatedly failed with `zsh: read-only variable: status` before reaching its polling logic.
