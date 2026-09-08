@@ -1,0 +1,105 @@
+**Commit:** `1cdda0d` on `selfheal/r1-orphan-reclaim`.
+
+One deviation you need to weigh before this ships, then the three logs.
+
+## The prescribed identity check does not work on this machine
+
+The brief said identity must come from an environment marker read back with `ps -E -o args= -p <pid>`, "verified on this machine". It is not readable here. I measured it two ways before writing any code:
+
+```
+$ WAKELITE_RUN_ID=probe-123 sleep 20 & ps -E -o args= -p $!
+sleep 20
+```
+
+and directly against the syscall `ps` itself uses, `KERN_PROCARGS2`, on a direct child of the calling process:
+
+```
+b'\x02\x00\x00\x00/bin/sleep\x00\x00\x00\x00\x00\x00/bin/sleep\x0020\x00'
+HAS MARKER: False
+```
+
+macOS 26.5.1 (build 25F80) returns argv only for a non-root caller, even for your own child. `sudo` would show it, but the runner is a user launchd agent. Shipping the check as specified would have classified every orphan as `pid_reused` and left it running — a safety net that never fires, which is worse than none.
+
+So identity is **process start time**: `active_runs` gains a `pid_started_at` column, recorded from `ps -o lstart=` right after `Popen`, and reclaim compares it. A recycled PID has a different start time. `WAKELITE_RUN_ID` / `WAKELITE_TIMER_ID` are still injected into every child and still checked first, so the check tightens by itself if the runner ever runs as root or moves to Linux. Command-line matching stays absent, as you said.
+
+Two consequences worth knowing: rows written before this column existed carry no start time, so the very first restart after deploy cannot reclaim anything (it records `orphan_unverified` and leaves the process alone). And an unjudgeable PID is never signalled — the safe direction.
+
+The port follow-on is in too, opt-in via `resources[].port`. Its ownership proof is an open fd on the timer's own run log, since that survives the `active_runs` row being deleted, which is the case the port path exists for.
+
+⚠️ The `port` key is a schema addition: a rolled-back runner rejects any timer carrying it, so a rollback must be paired with removing `port` from every timer that declares one. Nothing declares one today, so the cost is zero until a timer opts in. This is spelled out in the commit message.
+
+## Red run — before the change
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py::OrphanReclaimTests -v
+
+tests/test_service.py::OrphanReclaimTests::test_child_of_sigkilled_runner_is_reclaimed_on_next_start FAILED [ 33%]
+tests/test_service.py::OrphanReclaimTests::test_live_pid_that_is_not_ours_is_left_running FAILED [ 66%]
+tests/test_service.py::OrphanReclaimTests::test_row_older_than_boot_time_is_skipped_without_signalling FAILED [100%]
+
+E               AssertionError: True is not false : orphaned pid 66348 still running after startup reclaim
+tests/test_service.py:3732: AssertionError
+
+>           outcomes = svc._reclaim_orphaned_processes()
+E           AttributeError: 'WakeLiteService' object has no attribute '_reclaim_orphaned_processes'
+tests/test_service.py:3762: AttributeError
+
+>           outcomes = svc._reclaim_orphaned_processes()
+E           AttributeError: 'WakeLiteService' object has no attribute '_reclaim_orphaned_processes'
+tests/test_service.py:3790: AttributeError
+
+============================== 3 failed in 10.36s ==============================
+```
+
+The first test spawns its child through the real `_run_occurrence` path inside a throwaway interpreter and then SIGKILLs that interpreter, so the orphan is produced the way the incident produced it rather than by hand-rolling a `sleep`.
+
+For the port follow-on I took the red in two stages, since the schema key is a prerequisite for the behaviour. With `wakelite/service.py` and `wakelite/timer_store.py` stashed, all three fail on `ValueError: Unknown keys in resources[0]: {'port'}`. With only `service.py` stashed — schema present, port check absent — the behavioural one fails on its own:
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py::DeclaredPortTests -v
+
+tests/test_service.py::DeclaredPortTests::test_daemon_does_not_spawn_when_its_port_is_held_by_a_stranger FAILED [ 33%]
+tests/test_service.py::DeclaredPortTests::test_daemon_with_a_free_declared_port_spawns_normally PASSED [ 66%]
+tests/test_service.py::DeclaredPortTests::test_port_key_is_accepted_and_range_checked PASSED [100%]
+
+>           self.assertEqual(run["status"], "failed")
+E           AssertionError: 'success' != 'failed'
+E           - success
+E           + failed
+tests/test_service.py:3871: AssertionError
+
+========================= 1 failed, 2 passed in 30.15s =========================
+```
+
+## Green run — same tests, unchanged
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py::DeclaredPortTests tests/test_service.py::OrphanReclaimTests -v
+
+tests/test_service.py::DeclaredPortTests::test_daemon_does_not_spawn_when_its_port_is_held_by_a_stranger PASSED [ 16%]
+tests/test_service.py::DeclaredPortTests::test_daemon_with_a_free_declared_port_spawns_normally PASSED [ 33%]
+tests/test_service.py::DeclaredPortTests::test_port_key_is_accepted_and_range_checked PASSED [ 50%]
+tests/test_service.py::OrphanReclaimTests::test_child_of_sigkilled_runner_is_reclaimed_on_next_start PASSED [ 66%]
+tests/test_service.py::OrphanReclaimTests::test_live_pid_that_is_not_ours_is_left_running PASSED [ 83%]
+tests/test_service.py::OrphanReclaimTests::test_row_older_than_boot_time_is_skipped_without_signalling PASSED [100%]
+
+============================== 6 passed in 0.51s ===============================
+```
+
+## Full suite
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py -q
+
+......................................................................................................... [ 81%]
+........................                                                 [100%]
+129 passed, 39 subtests passed in 118.29s (0:01:58)
+```
+
+123 baseline plus the 6 new. The rest of `tests/` is also clean: 146 passed, 13 subtests.
+
+I left `launchctl`, `~/.wakelite`, the runner restart and the acceptance matrix alone, per the scope boundaries.
+
+**Done:** startup orphan reclaim by process identity for all timer types, plus opt-in `resources[].port` pre-spawn reclaim, committed as `1cdda0d` with red/green evidence · **Left:** deploy and acceptance, which are yours
+
+👉 Decide whether the start-time identity substitution is acceptable before you deploy — if you want the env marker to be load-bearing instead, the runner has to run as root, and I'd rather you make that call than assume it.

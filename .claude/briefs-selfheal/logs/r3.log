@@ -1,0 +1,64 @@
+**Commit `1bb6669`** on `selfheal/r3-network-spawn` (parent `9754fbd`): 3 files, +351/-18 — `wakelite/service.py`, `tests/test_service.py`, `CLAUDE.md`.
+
+## What changed
+
+**Part 1 — Slack post moved after `Popen`.** The "timer started" post now lives in a new `_post_run_started()` called right after `update_active_run_pid`, so nothing network-bound sits between the run row and the process start. The thread id it returns is still available where it is consumed (after `proc.wait()`).
+
+**Part 2 — `_network_ready(refresh=False)`.** Shells out to `route -n get default` first, then `scutil --nwi`, matching `(?<!Not )Reachable\)` so the IPv6 "Not Reachable" block does not count as up. No name resolution anywhere. Cached in `_network_ready_cache`, cleared at the top of each scheduler tick. Fails open when neither tool answers, so a probe we cannot trust never holds a run. `WAKELITE_FORCE_NETWORK_DOWN=1` is checked before the cache, so it takes effect immediately.
+
+**Part 3 — `_await_network_for_boot()`** runs just before `Popen`, inside the branch that already respects a pre-start abort. Waits only when runner uptime is under `BOOT_NETWORK_WINDOW_SECONDS` (300) and the probe is false; polls `NETWORK_WAIT_POLL_SECONDS` (5) via `self._stop.wait()` up to `NETWORK_WAIT_MAX_SECONDS` (120), then proceeds. A run-now outside the boot window is excluded by the uptime gate. No `waiting`/exit-75 path, no schema change, and `_spawning_runs` (from `9754fbd`) already covers the run for the whole wait, so the ghost check stays quiet.
+
+## Red run — unfixed code
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py::NetworkSpawnTests -q --tb=line
+F.FF                                                                     [100%]
+=================================== FAILURES ===================================
+E   AttributeError: 'WakeLiteService' object has no attribute '_network_ready'
+<worktree>/tests/test_service.py:3703: AttributeError: 'WakeLiteService' object has no attribute '_network_ready'
+E   AttributeError: <wakelite.service.WakeLiteService object at 0x10ae41a90> does not have the attribute 'NETWORK_WAIT_POLL_SECONDS'
+/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:1480: AttributeError: <wakelite.service.WakeLiteService object at 0x10ae41a90> does not have the attribute 'NETWORK_WAIT_POLL_SECONDS'
+E   AssertionError: 10.01380929199513 not less than 1.5 : Popen waited 10.0s on the notifier (notifier stalled 5s); it must not sit behind a network call
+/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/case.py:750: AssertionError: 10.01380929199513 not less than 1.5 : Popen waited 10.0s on the notifier (notifier stalled 5s); it must not sit behind a network call
+=========================== short test summary info ============================
+FAILED tests/test_service.py::NetworkSpawnTests::test_network_probe_never_resolves_a_name
+FAILED tests/test_service.py::NetworkSpawnTests::test_run_waits_for_network_in_boot_window_then_spawns
+FAILED tests/test_service.py::NetworkSpawnTests::test_stalled_slack_does_not_delay_popen
+3 failed, 1 passed in 10.09s
+```
+
+The incident regression (`test_stalled_slack_does_not_delay_popen`) is the meaningful red: the old code stalls 10.0s before `Popen` (two 5s notifier calls, `get_daily_thread_ts` then `notify_slack`) against a 1.5s budget — the exact shape of the 35s boot stall that overran the 30s ghost window.
+
+`test_run_now_outside_boot_window_does_not_wait` is the one that passes before the change. It cannot fail on code that has no wait at all; it exists to pin the new wait's exclusion so a later change cannot make a human's run-now sit through 120 seconds. The occurrence assertion in it and in the boot-wait test cover acceptance point 4 — both assert the occurrence ends `success`, never `pending`.
+
+## Green run — same tests, unchanged
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py::NetworkSpawnTests -q
+....                                                                     [100%]
+4 passed in 5.53s
+```
+
+Also verified through the direct runner the brief calls out, since class placement matters:
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 tests/test_service.py NetworkSpawnTests
+Ran 4 tests in 5.509s
+
+OK
+```
+
+## Full suite
+
+```
+$ PYTHONPATH=. /opt/homebrew/bin/python3 -m pytest tests/test_service.py -q
+......................................................................................................... [ 82%]
+......................                                                   [100%]
+127 passed, 39 subtests passed in 123.21s (0:02:03)
+```
+
+123 baseline plus the 4 new tests. I also ran `tests/test_slack_activity.py` and `tests/test_negative_matrix.py`, the two other files that touch the started-post path: 15 passed, 13 subtests.
+
+**Done:** committed the fix and 4 tests, red-then-green recorded, full suite green at 127. · **Left:** live verification and deploy, which are yours — the runner restart, and a `WAKELITE_FORCE_NETWORK_DOWN=1` run within 5 minutes of runner start to watch the wait fire.
+
+👉 Deploy the branch and confirm on the live machine that a daemon comes up on time at boot, since restarting the runner and touching `~/.wakelite` were out of scope for this session.
