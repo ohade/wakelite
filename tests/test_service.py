@@ -5144,6 +5144,76 @@ class ReclaimRefusesWhileRunnerAliveTests(unittest.TestCase):
             )
 
 
+class ReclaimFailsSafeOnUnknownOwnerTests(unittest.TestCase):
+    """An owner that cannot be READ is not the same as no owner.
+
+    `_recorded_runner_pid` used to return None on any state-store exception, and
+    None makes the liveness gate inert, so a transient read failure restored the
+    lethal behaviour for that tick. Found by a peer review of 049573f.
+    """
+
+    def _live_daemon(self, svc, WakeLiteService):
+        timer = svc.timer_store.create_timer({
+            "name": "live-daemon",
+            "comment": "a legitimately running daemon",
+            "enabled": True,
+            "timer_type": "daemon",
+            "recurrence": {"frequency": "interval", "every": "0s"},
+            "command": {"mode": "shell", "shell": "sleep 300"},
+        })
+        scheduled_at = datetime.now(timezone.utc).isoformat()
+        svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+        run = svc.state.create_run(
+            timer_id=timer["id"], timer_name=timer["name"], scheduled_at=scheduled_at,
+            is_catchup=False, queued_reason="daemon_start", timer_snapshot=json.dumps(timer),
+        )
+        svc.state.set_runtime_running(timer["id"], run["run_id"], scheduled_at)
+        child = subprocess.Popen(["/bin/sleep", "300"], start_new_session=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        svc.state.update_active_run_pid(
+            run["run_id"], child.pid, WakeLiteService._pid_start_time(child.pid)
+        )
+        return child
+
+    def test_unreadable_owner_reclaims_nothing(self):
+        import wakelite.service as service_module
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            child = self._live_daemon(svc, WakeLiteService)
+
+            class UnreadableOwner:
+                def __init__(self, inner):
+                    self._inner = inner
+
+                def get_meta(self, *args, **kwargs):
+                    raise RuntimeError("state store unavailable")
+
+                def __getattr__(self, name):
+                    return getattr(self._inner, name)
+
+            outcomes = service_module.reclaim_orphans(UnreadableOwner(svc.state))
+
+            self.assertEqual([], [o for o in outcomes if o.get("action") == "reclaimed"])
+            self.assertIsNone(child.poll(), "a transient read failure killed a live daemon")
+
+    def test_malformed_owner_reclaims_nothing(self):
+        import wakelite.service as service_module
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            child = self._live_daemon(svc, WakeLiteService)
+            svc.state.set_meta("runner.pid", "not-a-pid")
+
+            outcomes = service_module.reclaim_orphans(svc.state)
+
+            self.assertEqual([], [o for o in outcomes if o.get("action") == "reclaimed"])
+            self.assertIsNone(child.poll(), "a malformed owner pid killed a live daemon")
+
+
 
 if __name__ == "__main__":
     unittest.main()

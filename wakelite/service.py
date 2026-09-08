@@ -60,6 +60,14 @@ class DeclaredPortHeldError(RuntimeError):
     """A daemon's declared port is held by a process we must not kill."""
 
 
+class RunnerOwnerUnknown(RuntimeError):
+    """The owning runner could not be determined, as distinct from absent.
+
+    Reclaim treats this as "do not touch anything": an unreadable owner is not
+    evidence of an orphan, and guessing wrong kills live daemons.
+    """
+
+
 class WakeLiteService:
     def __init__(self, tick_seconds: int = 15, max_workers: int = MAX_WORKERS) -> None:
         ensure_dirs()
@@ -2719,15 +2727,22 @@ end tell'''],
         Written once per runner loop as meta `runner.pid`. Reclaim uses it to
         refuse to run while that runner is alive; `doctor` uses it to tell a
         child of the live runner from one orphaned by an earlier one.
+
+        Raises RunnerOwnerUnknown when the owner cannot be DETERMINED, which is
+        a different thing from there being no owner. Returning None for both
+        would make the reclaim gate inert on a transient state-store failure and
+        restore the lethal behaviour for that tick.
         """
         try:
             raw = state.get_meta("runner.pid")
-        except Exception:
+        except Exception as exc:
+            raise RunnerOwnerUnknown("runner.pid is unreadable") from exc
+        if raw is None:
             return None
         try:
             return int(str(raw).strip())
-        except (TypeError, ValueError):
-            return None
+        except (TypeError, ValueError) as exc:
+            raise RunnerOwnerUnknown(f"runner.pid is malformed: {raw!r}") from exc
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -3018,7 +3033,13 @@ end tell'''],
         exactly that inversion.
         """
         outcomes: List[Dict[str, Any]] = []
-        owner_pid = cls._recorded_runner_pid(state)
+        try:
+            owner_pid = cls._recorded_runner_pid(state)
+        except RunnerOwnerUnknown as exc:
+            # Fail safe: cannot determine the owner, so cannot call anything an
+            # orphan. Same direction as the recycled-PID case.
+            logger.warning("Orphan reclaim skipped: %s", exc)
+            return outcomes
         if owner_pid is not None and owner_pid != os.getpid() and cls._pid_alive(owner_pid):
             logger.info(
                 "Orphan reclaim skipped: runner pid %s is alive, so its children are owned",
