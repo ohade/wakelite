@@ -12,3 +12,6 @@ scripts/
 
 # Cached service config: regenerable, and contains internal hostnames/credentials.
 .claude/transcript-uploader/
+
+# Machine-local git worktrees; never part of the published tree.
+.claude/worktrees/
