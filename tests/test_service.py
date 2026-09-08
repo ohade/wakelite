@@ -5032,6 +5032,118 @@ class LaunchdInstallSubstitutionTests(unittest.TestCase):
             self.assertIn("--watchdog", parsed["ProgramArguments"])
 
 
+class ReclaimRefusesWhileRunnerAliveTests(unittest.TestCase):
+    """Reclaim must do nothing while the runner that owns the children is alive.
+
+    Regression for 2026-09-08: the watchdog ran `doctor --fix` every 300s against
+    a HEALTHY runner. Every live daemon has an active_runs row, a live PID and an
+    exact identity match, so the reclaim read "identity confirmed" as "orphan of
+    an unclean exit" and SIGTERMed all three daemons on a 5-minute cycle for ~22h.
+    claude-callout traps TERM and tears down its app, which is why that one was
+    visible while the other two failed silently.
+
+    A child is an orphan only because its runner died. If that runner is alive, a
+    positive identity match is the strongest possible evidence the child is NOT
+    an orphan — the same signal means the opposite thing depending on the caller,
+    and only the caller knows which.
+    """
+
+    def test_live_runner_means_zero_reclaims(self):
+        import wakelite.service as service_module
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "live-daemon",
+                "comment": "a legitimately running daemon",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 300"},
+            })
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+            svc.state.set_runtime_running(timer["id"], run["run_id"], scheduled_at)
+
+            child = subprocess.Popen(["/bin/sleep", "300"], start_new_session=True)
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            svc.state.update_active_run_pid(
+                run["run_id"], child.pid, WakeLiteService._pid_start_time(child.pid)
+            )
+
+            # doctor --fix always runs as a SEPARATE process from the runner, so
+            # the recorded runner pid must be another live process, not this one.
+            runner = subprocess.Popen(["/bin/sleep", "300"])
+            self.addCleanup(runner.wait)
+            self.addCleanup(runner.kill)
+            svc.state.set_meta("runner.pid", str(runner.pid))
+
+            outcomes = service_module.reclaim_orphans(svc.state)
+
+            self.assertEqual(
+                [], [o for o in outcomes if o.get("action") == "reclaimed"],
+                "reclaim killed a child of a LIVE runner",
+            )
+            self.assertIsNone(
+                child.poll(), "the live daemon was terminated by a reclaim it should have skipped"
+            )
+
+    def test_dead_runner_still_reclaims(self):
+        """The gate must not disable the startup safety net it guards."""
+        import wakelite.service as service_module
+
+        with tempfile.TemporaryDirectory() as td:
+            WakeLiteService = _bootstrap(td)
+            svc = WakeLiteService(tick_seconds=15)
+            timer = svc.timer_store.create_timer({
+                "name": "orphan-daemon",
+                "comment": "child of a runner that died uncleanly",
+                "enabled": True,
+                "timer_type": "daemon",
+                "recurrence": {"frequency": "interval", "every": "0s"},
+                "command": {"mode": "shell", "shell": "sleep 300"},
+            })
+            scheduled_at = datetime.now(timezone.utc).isoformat()
+            svc.state.reserve_occurrence(timer["id"], scheduled_at, False)
+            run = svc.state.create_run(
+                timer_id=timer["id"],
+                timer_name=timer["name"],
+                scheduled_at=scheduled_at,
+                is_catchup=False,
+                queued_reason="daemon_start",
+                timer_snapshot=json.dumps(timer),
+            )
+            svc.state.set_runtime_running(timer["id"], run["run_id"], scheduled_at)
+
+            child = subprocess.Popen(["/bin/sleep", "300"], start_new_session=True)
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            svc.state.update_active_run_pid(
+                run["run_id"], child.pid, WakeLiteService._pid_start_time(child.pid)
+            )
+
+            dead = subprocess.Popen(["/bin/sleep", "0"])
+            dead.wait()
+            svc.state.set_meta("runner.pid", str(dead.pid))
+
+            outcomes = service_module.reclaim_orphans(svc.state)
+
+            self.assertTrue(
+                [o for o in outcomes if o.get("action") == "reclaimed"],
+                "a true orphan of a dead runner must still be reclaimed",
+            )
+
+
 
 if __name__ == "__main__":
     unittest.main()

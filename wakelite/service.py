@@ -2713,6 +2713,23 @@ end tell'''],
     ORPHAN_RECLAIM_GRACE_SECONDS = 5.0
 
     @staticmethod
+    def _recorded_runner_pid(state: Any) -> Optional[int]:
+        """PID of the runner that owns the current children, or None.
+
+        Written once per runner loop as meta `runner.pid`. Reclaim uses it to
+        refuse to run while that runner is alive; `doctor` uses it to tell a
+        child of the live runner from one orphaned by an earlier one.
+        """
+        try:
+            raw = state.get_meta("runner.pid")
+        except Exception:
+            return None
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _pid_alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)  # signal 0 = existence check
@@ -2987,8 +3004,27 @@ end tell'''],
 
         Applies to all timer types. Two of the daemons declare no port at all, so
         an orphan there runs silently alongside its replacement.
+
+        REFUSES TO RUN WHILE THE OWNING RUNNER IS ALIVE. A child is an orphan only
+        because the runner that spawned it died; if that runner is still running,
+        its children are legitimately owned and a positive identity match is the
+        strongest possible evidence they are NOT orphans.
+
+        Without this gate the identity check inverts: from start() no live runner
+        exists so every match is a true orphan, but from `doctor --fix` on a
+        running system every match is a live daemon. The 2026-09-08 regression —
+        the watchdog SIGTERMing all three daemons every 300s for ~22h, with
+        claude-callout's TERM trap taking ClaudeCallout.app down each time — was
+        exactly that inversion.
         """
         outcomes: List[Dict[str, Any]] = []
+        owner_pid = cls._recorded_runner_pid(state)
+        if owner_pid is not None and owner_pid != os.getpid() and cls._pid_alive(owner_pid):
+            logger.info(
+                "Orphan reclaim skipped: runner pid %s is alive, so its children are owned",
+                owner_pid,
+            )
+            return outcomes
         try:
             rows = state.list_active_runs()
         except Exception:
