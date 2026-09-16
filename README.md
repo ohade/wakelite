@@ -1,6 +1,6 @@
 # WakeLite
 
-A reliability-first local scheduler for macOS that wakes your Mac from sleep to run your tasks. Web dashboard, CLI, and MCP integration for Claude/Codex. Zero dependencies.
+A reliability-first local scheduler for macOS that wakes your Mac from sleep to run your tasks. Web dashboard, CLI, and terminal callbacks. No PyPI packages at runtime.
 
 ![WakeLite hero — logo and add timer form](docs/screenshots/wakelite-hero.png)
 
@@ -12,24 +12,167 @@ A reliability-first local scheduler for macOS that wakes your Mac from sleep to 
 - **Wakes your Mac from sleep** before execution via `pmset` — your 2am scripts actually run at 2am
 - **Keeps daemons alive** with restart policies and exponential backoff
 - **Tracks everything** — run history, stdout/stderr logs, incidents, resource usage
+- **Reports back to your terminal** — a finished timer can post its result into the cmux, Ghostty, or WezTerm session that created it
 - **Notifies you** via macOS desktop and Slack DMs on success or failure
 
-## Quick Start
+## Requirements
+
+### Python
+
+Python 3.9 or newer. The package imports only the standard library at runtime, so **you never have to install a PyPI package to run WakeLite**.
+
+The tested floor is stated in `pyproject.toml`; this repository's own test runs use Python 3.14.
+
+### macOS command-line tools
+
+WakeLite shells out to system binaries. All of these ship with macOS, so a normal Mac already has them. They are listed so you know what breaks if one is missing or restricted.
+
+| Binary | Used by | Without it |
+|---|---|---|
+| `/bin/zsh` | `service.py` — every timer runs as `zsh -lc "<command>"` | No timer can run |
+| `pmset` | `reconciler.py` | No wake-from-sleep |
+| `launchctl` | `cli.py`, `launchd_install.py`, `doctor.py` | Cannot install, restart, or diagnose the background jobs |
+| `osascript` | `notifier.py`, Ghostty callbacks in `service.py` | Desktop-notification fallback and Ghostty injection fail |
+| `ps` | `service.py`, `doctor.py` | Orphan reclaim and daemon liveness checks degrade |
+| `lsof` | `service.py`, `doctor.py` | Port-holder detection for daemons stops working |
+| `sysctl` | `service.py` (`kern.boottime`) | Orphan reclaim cannot tell pre-boot rows apart |
+| `route`, `scutil` | `service.py` network probe | Timers may start before the network is up after a boot |
+| `security` | `notifier.py` | Slack token cannot be read from the Keychain |
+
+### Optional extras
+
+Each one enables a single feature. Skip any you do not want.
+
+| Extra | Install | Enables |
+|---|---|---|
+| `rumps` | `.venv/bin/pip install 'wakelite[ui]'` | The menu-bar app (`wakelite-menubar`) |
+| WakeLiteNotify.app | `notifier-app/build-app.sh`, then open the app once | Clickable desktop notifications. Building it needs the Xcode command line tools (`xcode-select --install`) |
+| `terminal-notifier` | `brew install terminal-notifier` | Second-choice desktop notifier when WakeLiteNotify.app is absent |
+| cmux | Install cmux.app | cmux terminal callbacks — see [Terminal callbacks](#terminal-callbacks) |
+| `amq` | `brew install avivsinai/tap/amq` | The durable AMQ delivery route for cmux callbacks |
+| WezTerm or Ghostty | The respective app | WezTerm or Ghostty terminal callbacks |
+| `jq` | `brew install jq` | `wakelite/scripts/wakelite-rollback-cmux-timers.sh` |
+| Node.js 18+ | `brew install node` | The dashboard's JavaScript contract test. The dashboard itself does not need Node |
+| `pytest` | `.venv/bin/pip install pytest` | The test suite. It is deliberately not a declared dependency |
+| Slack bot token | `SLACK_BOT_TOKEN`, or a Keychain entry, or `~/.claude.json` | Slack DM notifications |
+
+## Install
+
+WakeLite runs straight from a clone. **Do not `pip install` it into your system or Homebrew Python** — `[project.scripts]` in `pyproject.toml` would put `wakelitectl` and its sibling console scripts onto that interpreter.
 
 ```bash
 git clone <repo-url> && cd wakelite
+python3 -m venv .venv          # optional but recommended; the wrappers find it automatically
+./bin/wakelitectl --help
+```
 
-# Start the runner (REST API + scheduler + web dashboard)
-PYTHONPATH=. ./bin/wakelitectl serve --with-mcp-http
+The wrappers in `bin/` set `PYTHONPATH` to the repository root and prefer `.venv/bin/python` when it exists, falling back to whatever `python3` is on your `PATH`. So `./bin/wakelitectl` needs no environment setup and no `PYTHONPATH=` prefix.
 
-# Open the dashboard
+You still need `PYTHONPATH` when you bypass the wrappers. The test suite needs it from anywhere, and `python3 -m wakelite.cli` needs it whenever your working directory is not the repository root:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
+PYTHONPATH=/path/to/wakelite python3 -m wakelite.cli timer list
+```
+
+Data lives in `~/.wakelite/` (timers, SQLite state, logs). Set `WAKELITE_HOME` to relocate it. Never copy another machine's `~/.wakelite/` — it holds that machine's live timers.
+
+## Run It
+
+### Foreground
+
+```bash
+./bin/wakelitectl serve
 open http://127.0.0.1:17341/ui
 ```
 
-## Create a Timer (CLI)
+The runner is the single source of truth: it owns the scheduler loop, the REST API on port `17341`, and the web dashboard at `/ui`. Every other component is a client of that API.
+
+### Always on (recommended)
+
+Install the runner as a launchd **user** agent. No `sudo`, and it does not touch any other account on the Mac.
 
 ```bash
-PYTHONPATH=. ./bin/wakelitectl timer create --file - --idempotency-key my-first-timer <<'EOF'
+./bin/wakelitectl launchd install --scope user --load
+./bin/wakelitectl launchd status
+./bin/wakelitectl health
+```
+
+After you change the code, restart it. This purges `__pycache__` and kickstarts the job:
+
+```bash
+./bin/wakelitectl launchd restart
+```
+
+### Wake-from-sleep (system daemon)
+
+Hardware wakes need root, because only root can program `pmset`. The reconciler reads `~/.wakelite/wake-intents.json`, which the runner writes, and reconciles it with `pmset schedule` every 10 minutes.
+
+```bash
+sudo ./bin/wakelitectl launchd install --scope system --load
+pmset -g sched    # should list wake entries owned by com.wakelite
+```
+
+The reconciler resolves the owning user's `WAKELITE_HOME` from the owner of the script file, so there are no hardcoded home paths. Note that `bin/wakelite-reconciler` always executes `python3` rather than the virtual environment, because root has a different `PATH`.
+
+You can preview what it would do without installing anything:
+
+```bash
+./bin/wakelitectl reconcile --once --dry-run
+```
+
+## CLI Reference
+
+`./bin/wakelitectl <command>`. Every mutating operation takes `--idempotency-key`: the same key replayed within 24 hours returns the original result instead of repeating the action.
+
+### Service
+
+| Command | Purpose |
+|---|---|
+| `serve [--tick-seconds N]` | Run the scheduler, REST API, and dashboard in the foreground |
+| `health` | Service health as JSON from the REST API. Needs a running runner |
+| `doctor` | Full diagnosis — see [doctor](#diagnose-doctor) |
+| `reconcile [--once] [--dry-run] [--interval N]` | Run the wake reconciler directly |
+
+### Timers
+
+| Command | Purpose |
+|---|---|
+| `timer list` | All timers with their next run |
+| `timer create --file <path\|-> --idempotency-key K` | Create from a JSON payload; `-` reads stdin |
+| `timer update <id> [--file F] [--name N] [--comment C] [--shell S] [--enabled BOOL]` | Edit by file or inline flags |
+| `timer enable <id> --idempotency-key K` | Enable |
+| `timer disable <id> --idempotency-key K` | Disable |
+| `timer delete <id> --idempotency-key K` | Delete. Takes the timer UUID, not the name |
+| `timer run-now <id> --idempotency-key K` | Fire once immediately, off schedule |
+| `timer clone <id> [--name N] [--patch-file F]` | Copy an existing timer |
+| `timer from-template <template> --name N ...` | Create from a bundled template |
+| `template list` / `template show <name>` | Browse the templates |
+
+### Runs and incidents
+
+| Command | Purpose |
+|---|---|
+| `runs list [--limit N] [--timer-id ID]` | Run history |
+| `runs logs <run_id>` | stdout and stderr for one run |
+| `runs abort <run_id> --idempotency-key K` | Kill a running command |
+| `incidents list` / `incidents summary` | Open incidents, and the breakdown by type and timer |
+| `incidents ack <id>` / `incidents ack-all` | Resolve incidents |
+| `incidents mute list\|add\|rm` | Ignore rules for known-noisy sources |
+
+### launchd
+
+| Command | Purpose |
+|---|---|
+| `launchd install [--scope user\|system\|both] [--load]` | Install the plists. `--scope system` requires `sudo` |
+| `launchd uninstall [--scope ...] [--unload]` | Remove them |
+| `launchd status` | Job state for both scopes |
+| `launchd restart` | Purge `__pycache__` and kickstart the runner |
+
+## Create a Timer
+
+```bash
+./bin/wakelitectl timer create --file - --idempotency-key my-first-timer <<'EOF'
 {
   "name": "morning-check",
   "comment": "Run health check every morning",
@@ -41,114 +184,111 @@ PYTHONPATH=. ./bin/wakelitectl timer create --file - --idempotency-key my-first-
 EOF
 ```
 
-## Create a Timer (Web UI)
+Or use the dashboard — fill in the "Add Wakeup" form at the top and click **Create Wakeup**. No JSON required.
 
-Or just use the dashboard — fill in the "Add Wakeup" form at the top and click **Create Wakeup**. No JSON required.
+The full schema, every field, and all recurrence types are in [`docs/API.md`](docs/API.md). Timer-authoring traps that cost real debugging time are in [`.claude/rules/timer-authoring-gotchas.md`](.claude/rules/timer-authoring-gotchas.md).
 
-## MCP Integration
+## Terminal Callbacks
 
-Give Claude or Codex full control over your timers:
+A timer can post its result back into the terminal session that created it. This closes the loop on "start a long poll, walk away, get the answer where you were working". Three callback types are supported: `cmux`, `ghostty`, and `wezterm`.
+
+### How capture works
+
+`auto_capture_terminal()` in `wakelite/config.py` runs when a timer is created, from both the CLI and the REST API. It checks cmux first, then `$GHOSTTY_TERMINAL_ID`, then `$WEZTERM_PANE`. You do not set the callback type by hand.
+
+### cmux
+
+cmux capture needs **both** `$CMUX_WORKSPACE_ID` and `$CMUX_SURFACE_ID` (`$CMUX_PANEL_ID` is accepted as an alias for the second). If only one is present, the callback is rejected and detection falls through to Ghostty and WezTerm. That rule exists because a `CMUX_SURFACE_ID` leaked from a parent process would otherwise produce a half-filled callback that only fails later, at delivery time.
+
+Capture also records `$CMUX_SOCKET_PATH` and the first cmux CLI it finds. The CLI is resolved from `$CMUX_BUNDLED_CLI_PATH`, then `/opt/homebrew/bin/cmux`, `/usr/local/bin/cmux`, and `/Applications/cmux.app/Contents/Resources/bin/cmux` — deliberately **not** from `PATH`, because unrelated toolchains ship a binary with the same name.
+
+`session_id` is not captured from the environment. A caller that wants resume and AMQ identity has to pass it. When a new cmux timer is created with a non-empty `session_id`, `callback.amq` defaults to `true`, because the AMQ route survives a terminal that has gone away. This default applies at creation only — clone and `from-template` count as creation. An explicit `false` is preserved, and timers already on disk are never opted in silently.
+
+`wakelite/timer_store.py` validates the stored shape. `callback.amq` is valid only on `cmux`. An unknown `callback.type` is neutralized with a warning rather than rejected, so rolling back to an older WakeLite does not brick existing timers.
+
+### What happens when a cmux timer finishes
+
+`_cmux_callback()` in `wakelite/service.py` runs this sequence:
+
+1. Write a recovery signal file first, to `~/.wakelite/<session>.<run>.wakelite-callback.json`. The file is the durable data channel; terminal injection is only the trigger.
+2. If `callback.amq` is true and `WAKELITE_AMQ_CALLBACK_ENABLED` is not disabled, resolve the live surface through `~/.cmuxterm/claude-hook-sessions.json` (entries older than 24 hours are ignored), confirm a live AMQ wake with `amq wake check`, then `amq send`. On success the signal file is deleted and delivery is done.
+3. Otherwise inject through the cmux CLI: `send` with the text, then `send-key Enter`. cmux does not treat a trailing newline as Enter, so the second call is required. A stale workspace or surface triggers a retarget through the session store, and then a `new-workspace` plus `claude --resume <session_id>` fallback.
+4. The outcome is recorded as `amq-sent`, `fallback-delivered`, or `delivery-failed`.
+
+Callbacks fire on `success` and `failed` only — never on exit code 75 ("waiting") and never on an aborted run.
+
+### Rolling cmux callbacks back
+
+If a cmux version changes under you, stop the injection without editing timers by hand:
 
 ```bash
-PYTHONPATH=. ./bin/wakelitectl mcp install --targets claude,codex
+wakelite/scripts/wakelite-rollback-cmux-timers.sh --list
+wakelite/scripts/wakelite-rollback-cmux-timers.sh --neutralize
+wakelite/scripts/wakelite-rollback-cmux-timers.sh --rewrite ghostty
 ```
 
-Namespace: `wakelite.v1.*` — see [`docs/API.md`](docs/API.md) for the full tool list.
+It needs `jq` and a reachable `wakelitectl`.
+
+### Ghostty and WezTerm
+
+Both inject directly into `$GHOSTTY_TERMINAL_ID` or `$WEZTERM_PANE` and have no AMQ route; setting `callback.amq` on them is a validation error. If the terminal is gone, WakeLite sends a Slack DM and opens a new tab running `claude --resume <session_id>`.
 
 ## Diagnose (`doctor`)
 
 ```bash
-PYTHONPATH=. ./bin/wakelitectl doctor          # heartbeat, daemons, ports, failing timers, incidents
-PYTHONPATH=. ./bin/wakelitectl doctor --json   # same report, machine-readable
-PYTHONPATH=. ./bin/wakelitectl doctor --fix    # reclaim orphans; kickstart a stale runner
-PYTHONPATH=. ./bin/wakelitectl doctor --quiet  # silent when healthy — safe to run on a schedule
+./bin/wakelitectl doctor            # heartbeat, daemons, ports, failing timers, incidents
+./bin/wakelitectl doctor --json     # same report, machine-readable
+./bin/wakelitectl doctor --fix      # reclaim orphans; kickstart a stale runner
+./bin/wakelitectl doctor --quiet    # silent when healthy — safe to run on a schedule
+./bin/wakelitectl doctor --watchdog # implies --fix --quiet; used by the watchdog launchd job
 ```
 
-Unlike every other subcommand, `doctor` falls back to reading `~/.wakelite/state.db`
-directly when the REST API does not answer, because a hung runner is exactly the
-case where the API stops answering. Exit code is `0` when healthy, `1` when the
-report lists problems.
+`doctor` is the first command to run when anything looks wrong. Unlike every other subcommand it falls back to reading `~/.wakelite/state.db` directly when the REST API does not answer, because a hung runner is exactly the case where the API stops answering. Exit code is `0` when healthy and `1` when the report lists problems.
 
-`--fix` does exactly two things and records an incident for each: reclaim orphaned
-daemon children, and `launchctl kickstart -k` the runner when the heartbeat is stale.
-The kick is capped at one per 30 minutes; after two kicks in two hours fail to
-restore the heartbeat it raises one critical incident and stops kicking.
+`--fix` does exactly two things and records an incident for each: reclaim orphaned daemon children, and `launchctl kickstart -k` the runner when the heartbeat is stale. The kick is capped at one per 30 minutes. After two kicks in two hours fail to restore the heartbeat it raises one critical incident and stops kicking.
 
-To have `doctor` check a daemon's port, declare it as a resource named
-`port:17382`, or name the resource anything containing "port" and put the number
-in its description.
+To have `doctor` check a daemon's port, declare it as a resource named `port:17382`, or name the resource anything containing "port" and put the number in its description.
 
 ## Features
 
 - **Timer types**: Scheduled (one-shot on recurrence) and Daemon (long-lived, kept alive)
 - **Recurrence**: daily, weekly, monthly, one-off, interval (with active-hours windowing)
-- **Wake-from-sleep**: `pmset` scheduling with configurable lead time — your Mac wakes up before the timer fires
+- **Wake-from-sleep**: `pmset` scheduling with configurable lead time
 - **Execution controls**: overlap policy (skip/queue/allow), max concurrency, restart with exponential backoff
 - **Run lifecycle**: `until` conditions (auto-delete on success/failure), `max_runs` limit (auto-disable)
 - **Exit code 75**: BSD `EX_TEMPFAIL` — polling scripts return "waiting" (blue rows) instead of "failed" (red rows)
-- **Notifications**: macOS desktop + Slack DMs, global mute toggle
-- **Resources**: capacity tracking per timer to prevent overcommit
-- **Clickable notifications**: desktop alerts open the timer or report they are about,
-  posted by the small `notifier-app/` bundle (build with `notifier-app/build-app.sh`)
-- **Incidents**: auto-detection of repeated failures, with a dashboard report at
-  `/ui#incidents` — breakdown by type and timer, daily trend, per-incident resolve,
-  filtered bulk resolve, and ignore rules for known-noisy sources
+- **Notifications**: macOS desktop and Slack DMs, global mute toggle
+- **Resources**: time-axis capacity tracking that blocks a create or update only when timers actually overlap in time
+- **Terminal callbacks**: cmux, Ghostty, and WezTerm, with a durable AMQ route and a signal-file recovery channel
+- **Incidents**: auto-detection of repeated failures, with a dashboard report at `/ui#incidents` — breakdown by type and timer, daily trend, per-incident resolve, filtered bulk resolve, and ignore rules
 - **Web dashboard**: real-time status, inline editing, run-now, abort, log viewing — installable as a PWA (Chrome → "Install page as app")
-- **MCP integration**: full Claude/Codex tool namespace for AI-driven scheduling
-- **Idempotency**: every create/update/delete requires a caller-chosen key — if the same key is sent twice within 24 hours, the second call returns the original result instead of duplicating the action
-- **Crash recovery**: missed-run catch-up, uncertain-run marking, at-least-once delivery
-- **`doctor`**: one read-only command for runner heartbeat, daemon liveness and
-  parentage, port ownership, failure streaks and open incidents — reads the state
-  database directly so it still answers when the runner is hung
-- **Zero dependencies**: Python stdlib only (optional: `rumps` for menu bar app)
-
-## Installation
-
-### Runner (user agent)
-
-The runner handles scheduling, command execution, and the web dashboard. Install it as a launchd user agent:
-
-```bash
-PYTHONPATH=. ./bin/wakelitectl launchd install --load
-```
-
-### Wake Reconciler (system daemon)
-
-For **wake-from-sleep** support, the reconciler syncs timer wake intents to `pmset schedule`. It runs as root so it can program hardware wakes.
-
-```bash
-# Install and start the system daemon (requires sudo)
-PYTHONPATH=. ./bin/wakelitectl launchd install-system --load
-```
-
-The reconciler resolves the owning user's `WAKELITE_HOME` from the script file's owner — no hardcoded paths. It reads `~/.wakelite/wake-intents.json` (written by the runner) and reconciles with `pmset schedule` entries every 10 minutes.
-
-**Verify it's working:**
-
-```bash
-pmset -g sched  # Should show wake entries by 'com.wakelite'
-```
-
-## Docs
-
-- **[`docs/API.md`](docs/API.md)** — Full timer schema, field reference, recurrence types, execution controls, REST/MCP API reference
-- **[`.claude/rules/`](.claude/rules/)** — Claude Code rules: timer authoring gotchas, notification conventions
+- **Idempotency**: every create, update, and delete requires a caller-chosen key
+- **Crash recovery**: missed-run catch-up, uncertain-run marking, orphan reclaim by process start time
 
 ## Testing
 
-The full suite requires Python 3.9+ and Node.js 18+; Node executes the dashboard's
-inline JavaScript contract tests.
-
 ```bash
-PYTHONPATH=. python -m pytest tests/ -v
+python3 -m venv .venv
+.venv/bin/pip install pytest
+PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
 ```
 
-## Prerequisites
+`pytest` is intentionally not a declared dependency, so install it inside the virtual environment rather than globally. Node.js 18+ is needed only for `tests/test_ui_health_contract.py`, which runs the dashboard's inline JavaScript contract tests.
 
-- macOS (tested on Apple Silicon)
-- Python 3.9+
-- Node.js 18+ (for the full test suite)
-- Optional: `rumps` for menu bar app
+## Machine-Specific Defaults
+
+WakeLite grew out of one person's machine, and a few identifiers are still hardcoded. None of them stop it from running, but you should know about them before you install it somewhere else.
+
+- launchd labels are `com.wakelite.*`. The user agent is per-user, so it will not collide with another account, but the name will look odd on your Mac.
+- The system reconciler installs to `/Library/LaunchDaemons/com.wakelite.wakereconciler.plist`, which is machine-wide. Two users on one Mac would overwrite each other's copy.
+- `AMQ_BINARY_PATH` in `wakelite/config.py` is `/opt/homebrew/bin/amq`. An Intel Mac needs `/usr/local/bin/amq` instead.
+- The Slack notifier resolves its token from `SLACK_BOT_TOKEN`, then a Keychain entry, then `~/.claude.json`, and targets a fixed DM channel. Without a token it skips Slack and everything else still works.
+
+## Docs
+
+- **[`docs/API.md`](docs/API.md)** — full timer schema, field reference, recurrence types, execution controls, REST API reference, callback fields
+- **[`.claude/rules/timer-authoring-gotchas.md`](.claude/rules/timer-authoring-gotchas.md)** — schema traps, interval and daemon rules, callback behaviour
+- **[`CLAUDE.md`](CLAUDE.md)** — architecture, module map, and the reasoning behind the capacity gate, the boot-window network wait, and orphan reclaim
 
 ## License
 
