@@ -1,7 +1,7 @@
 """HTTP-level contract test for CapacityExceededError → 409 + CAPACITY_EXCEEDED.
 
 WL-12 preserves this public contract. A refactor that renames the exception
-or drops the 409 mapping would silently break the web UI and the MCP bridge,
+or drops the 409 mapping would silently break the web UI,
 neither of which would be caught by service-layer tests.
 """
 from __future__ import annotations

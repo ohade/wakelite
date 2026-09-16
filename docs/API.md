@@ -222,7 +222,7 @@ Optional. Reconnects timer results to the originating terminal session.
 
 **Behavior:**
 - Callback fires on `success` and `failed` status only. Never on `waiting` (exit 75) or `aborted`.
-- Terminal identity is auto-captured when creating via CLI, MCP, or REST API if the server process has the relevant environment variables. Detection order is cmux, Ghostty, then WezTerm.
+- Terminal identity is auto-captured when creating via CLI or REST API if the creating process has the relevant environment variables. Detection order is cmux, Ghostty, then WezTerm.
 - Creation applies the AMQ default only to new resumable cmux callbacks. Clone and from-template are creation operations and therefore apply the same default. Explicit `"amq": false` is preserved, updates do not silently opt in an existing timer, and already-stored legacy timers remain unchanged.
 - Callback objects reject unknown subkeys. A misspelling such as `"ammq": true` fails validation instead of silently disabling the route.
 - For a cmux callback with `"amq": true`, WakeLite writes the recovery signal first, resolves the current surface and its exact `active` or `attached` AMQ registration from `session_id`, and uses the official `amq wake check --json --json-schema=2` contract to require a live, valid wake for that root and recipient. The keepalive state selects a registered mailbox but does not by itself prove or disprove doorbell liveness: an owner-bound wake may remain usable while its supervisor reports `attached`. Codex sessions do not populate Claude's cmux session store, so a store miss may use the timer's captured workspace/surface only after a fresh liveness probe positively confirms that exact surface; unknown or dead captured targets fail closed to direct cmux fallback. Session-store targets preserve the existing rule that alive and unknown may route through AMQ while only a canonical stale-target result proves the target dead. An AMQ send that exits successfully with a non-empty message ID proves that AMQ stored the body: WakeLite then deletes the local signal file and deliberately surrenders the cmux fallback. A dead target, missing or ambiguous identity, missing/unusable wake, failed wake check, rejected/malformed send, or timeout uses the existing cmux fallback. `WAKELITE_AMQ_CALLBACK_ENABLED=false` disables this route globally.
@@ -288,7 +288,6 @@ This timer was created during your session. Act on the results above.
 | Creation path | Has terminal env? | Auto-capture works? |
 |--------------|-------------------|-------------------|
 | CLI from Claude Code terminal | Yes | Yes |
-| MCP from Claude Code | Yes (inherited) | Yes |
 | REST API from external tool | No | No (pass explicitly) |
 
 ### `max_runs`
@@ -338,35 +337,6 @@ Use this in polling scripts to signal "condition not met yet, keep trying."
 - `stdout_available`
 - `stderr_available`
 - `logs_expired` (true when files are gone and retention has elapsed)
-
----
-
-## MCP
-
-Namespace: `wakelite.v1.*`
-
-Transports:
-- stdio: `bin/wakelite-mcp`
-- HTTP JSON-RPC: `POST http://127.0.0.1:17342/mcp`
-
-Tools:
-- `wakelite.v1.health.get`
-- `wakelite.v1.timer.list`
-- `wakelite.v1.timer.create`
-- `wakelite.v1.timer.update`
-- `wakelite.v1.timer.delete`
-- `wakelite.v1.timer.enable`
-- `wakelite.v1.timer.disable`
-- `wakelite.v1.timer.run_now`
-- `wakelite.v1.run.list`
-- `wakelite.v1.run.logs.get`
-- `wakelite.v1.run.abort`
-- `wakelite.v1.alert.ack`
-
-Mutating tools require `idempotency_key`.
-
-Fail-fast behavior:
-- If runner/API is down, tool calls return `SERVICE_UNAVAILABLE` and do not auto-start services.
 
 ---
 

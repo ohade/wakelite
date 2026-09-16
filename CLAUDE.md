@@ -26,17 +26,15 @@ No dependencies to install — zero external packages for runtime (stdlib only).
 
 ## Architecture
 
-WakeLite is a local macOS scheduler with four independently running components:
+WakeLite is a local macOS scheduler with three independently running components:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │ runner (bin/wakelite-runner)                             │
 │   WakeLiteService  ──  scheduler loop (threading)       │
 │   ApiServer        ──  REST API on :17341 + Unix socket │
-│   MCP HTTP         ──  JSON-RPC on :17342 (optional)    │
 └─────────────────────────────────────────────────────────┘
   bin/wakelitectl ── CLI client (talks to REST API)
-  bin/wakelite-mcp ── MCP stdio proxy (talks to REST API)
   bin/wakelite-reconciler ── system-level pmset wake scheduling (runs as root)
 ```
 
@@ -56,7 +54,6 @@ The **runner** is the single source of truth. Everything else is a client that t
 | `capacity.py` | Time-axis per-resource admission gate. Projects each timer's resource use onto N-minute buckets over a 7-day horizon, blocks create/update when any resource's peak > capacity. Pure functions, no I/O. `_executor.slot` is a well-known resource (capacity=MAX_WORKERS); user-declared `resources[]` participate when `capacity`/`estimated_usage` parse |
 | `service.py` | **Core orchestrator.** Scheduler loop, run execution (ThreadPoolExecutor), timer lifecycle |
 | `http_api.py` | REST API handler + embedded web UI (single-file HTML/CSS/JS in Python string) |
-| `mcp_server.py` | MCP protocol bridge — translates MCP tool calls to REST API calls |
 | `reconciler.py` | Reads timer wake intents, reconciles with `pmset schedule` entries |
 | `doctor.py` | `wakelitectl doctor` — read-only diagnosis of heartbeat, daemons, ports, failure streaks, incidents. The only client that bypasses REST: it falls back to opening `state.db` directly, because a hung runner is exactly when the API stops answering. `--fix` does two bounded things (orphan reclaim, rate-limited `launchctl kickstart`) and records an incident for each |
 
@@ -91,8 +88,6 @@ All mutating operations (create, update, delete, enable, disable, run-now, abort
 Tests in `tests/test_service.py` use a `_bootstrap(temp_dir)` helper that redirects `WAKELITE_HOME` to a temp directory and reloads all modules. This gives each test a fresh timer store and state DB.
 
 Timer execution tests call `svc._schedule_occurrence()` directly and `time.sleep()` to wait for the thread pool. Typical wait is 1.5s for simple commands.
-
-The MCP test (`test_mcp_and_manifest.py`) is flaky — it tests that MCP fails fast when the runner is down, but passes when the runner is actually running.
 
 ## Web UI
 

@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from .config import API_HOST, API_PORT, auto_capture_terminal
 from .launchd_install import install_system, install_user, status as launchd_status, uninstall_system, uninstall_user
-from .mcp_manifest import generate_manifest, install_global_configs, manual_snippets
 from .reconciler import main as reconciler_main
 from .runner_main import main as runner_main
 
@@ -43,22 +42,6 @@ def _print_json(payload: Dict[str, Any]) -> None:
 def _print_warnings(response: Dict[str, Any]) -> None:
     for w in response.get("warnings", []):
         print(f"\033[33mwarning:\033[0m {w}", file=sys.stderr)
-
-
-def _cmd_manifest(args: argparse.Namespace) -> None:
-    manifest = generate_manifest(args.mcp_command)
-    _print_json(manifest)
-
-
-def _cmd_mcp_install(args: argparse.Namespace) -> None:
-    targets = [t.strip() for t in args.targets.split(",") if t.strip()]
-    result = install_global_configs(args.mcp_command, targets)
-    manifest = generate_manifest(args.mcp_command)
-    _print_json({"installed": result, "manifest": manifest})
-
-
-def _cmd_mcp_print(args: argparse.Namespace) -> None:
-    _print_json(manual_snippets(args.mcp_command))
 
 
 def _cmd_health(args: argparse.Namespace) -> None:
@@ -354,24 +337,11 @@ def main() -> None:
 
     serve = sub.add_parser("serve", help="run runner + API")
     serve.add_argument("--tick-seconds", type=int, default=15)
-    serve.add_argument("--with-mcp-http", action="store_true")
 
     reconcile = sub.add_parser("reconcile", help="run wake reconciler")
     reconcile.add_argument("--once", action="store_true")
     reconcile.add_argument("--dry-run", action="store_true")
     reconcile.add_argument("--interval", type=int, default=600)
-
-    manifest = sub.add_parser("manifest", help="generate manifest")
-    manifest.add_argument("--mcp-command", default=str(Path(__file__).resolve().parents[1] / "bin" / "wakelite-mcp"))
-
-    mcp = sub.add_parser("mcp", help="mcp config helpers")
-    mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
-    mcp_install = mcp_sub.add_parser("install", help="install global mcp config")
-    mcp_install.add_argument("--targets", default="claude,codex")
-    mcp_install.add_argument("--mcp-command", default=str(Path(__file__).resolve().parents[1] / "bin" / "wakelite-mcp"))
-
-    mcp_print = mcp_sub.add_parser("print-config", help="print config snippets")
-    mcp_print.add_argument("--mcp-command", default=str(Path(__file__).resolve().parents[1] / "bin" / "wakelite-mcp"))
 
     sub.add_parser("health", help="service health")
 
@@ -584,7 +554,7 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
 
     if args.cmd == "serve":
         # Reuse runner parser by replacing argv.
-        sys.argv = [sys.argv[0], "--tick-seconds", str(args.tick_seconds)] + (["--with-mcp-http"] if args.with_mcp_http else [])
+        sys.argv = [sys.argv[0], "--tick-seconds", str(args.tick_seconds)]
         runner_main()
         return
 
@@ -592,18 +562,6 @@ Examples: ~/git/playground/wakelite/docs/*.timer.json""",
         sys.argv = [sys.argv[0]] + (["--once"] if args.once else []) + (["--dry-run"] if args.dry_run else []) + ["--interval", str(args.interval)]
         reconciler_main()
         return
-
-    if args.cmd == "manifest":
-        _cmd_manifest(args)
-        return
-
-    if args.cmd == "mcp":
-        if args.mcp_cmd == "install":
-            _cmd_mcp_install(args)
-            return
-        if args.mcp_cmd == "print-config":
-            _cmd_mcp_print(args)
-            return
 
     if args.cmd == "health":
         _cmd_health(args)

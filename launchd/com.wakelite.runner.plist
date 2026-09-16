@@ -8,7 +8,6 @@
   <key>ProgramArguments</key>
   <array>
     <string>/path/to/wakelite/bin/wakelite-runner</string>
-    <string>--with-mcp-http</string>
   </array>
 
   <key>RunAtLoad</key>
