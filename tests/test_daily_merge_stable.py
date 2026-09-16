@@ -140,6 +140,10 @@ class DailyMergeStableFixtureTests(unittest.TestCase):
                 "DAILY_MERGE_NOTIFIER_BIN": str(self.notifier),
                 "DAILY_MERGE_GIT_BIN": str(self.git_wrapper),
                 "DAILY_MERGE_STREAK_THRESHOLD": "3",
+                # The script trusts no author unless told who to trust, so the
+                # fixture declares its own identity. Matches the fixture-author@example.test
+                # authors configured in _setup_products.
+                "DAILY_MERGE_AUTHOR_PATTERN": "fixture",
                 "FIXTURE_NOTIFY_LOG": str(self.notify_log),
                 "FIXTURE_NOTIFY_EXIT": str(notify_exit),
                 "FIXTURE_GIT_MODE": str(self.git_mode),

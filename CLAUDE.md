@@ -228,5 +228,5 @@ budget on EADDRINUSE.
 - **Timer JSON validation is strict.** Unknown top-level keys are rejected. See `ALLOWED_PAYLOAD_KEYS` in `timer_store.py`.
 - **`until` deletes timers; `max_runs` disables them.** First limit reached wins when both are set.
 - **Slack activity is opt-out per timer.** `notifications.slackActivity` defaults to `true` (including when absent on legacy timers). Set it to `false` for local-only monitors; this suppresses run-start, run-end, and auto-delete Slack lifecycle writes. Callback fallbacks remain a separate delivery path.
-- **Slack token** for `notifier.notify_slack()` is read from `~/.claude.json` → `mcpServers.slack.env.SLACK_BOT_TOKEN`.
+- **Slack config is env-driven.** `WAKELITE_SLACK_CHANNEL` (no default — unset disables Slack), `SLACK_BOT_TOKEN`, then Keychain via `WAKELITE_KEYCHAIN_SERVICE`/`WAKELITE_KEYCHAIN_ACCOUNT`, then legacy `~/.claude.json`.
 - **Exit code 75 = "waiting/not ready yet".** Polling scripts should `exit 75` (not `exit 1`) when the condition isn't met yet. WakeLite shows these as blue "Waiting" rows instead of red "Failed". Exit 75 does not trigger failure notifications, incidents, or until conditions.

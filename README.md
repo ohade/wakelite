@@ -54,7 +54,7 @@ Each one enables a single feature. Skip any you do not want.
 | `jq` | `brew install jq` | `wakelite/scripts/wakelite-rollback-cmux-timers.sh` |
 | Node.js 18+ | `brew install node` | The dashboard's JavaScript contract test. The dashboard itself does not need Node |
 | `pytest` | `.venv/bin/pip install pytest` | The test suite. It is deliberately not a declared dependency |
-| Slack bot token | `SLACK_BOT_TOKEN`, or a Keychain entry, or `~/.claude.json` | Slack DM notifications |
+| Slack bot token | `SLACK_BOT_TOKEN`, or a Keychain entry | Slack notifications. Also set `WAKELITE_SLACK_CHANNEL` |
 
 ## Install
 
@@ -275,14 +275,27 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
 
 `pytest` is intentionally not a declared dependency, so install it inside the virtual environment rather than globally. Node.js 18+ is needed only for `tests/test_ui_health_contract.py`, which runs the dashboard's inline JavaScript contract tests.
 
-## Machine-Specific Defaults
+## Configuration
 
-WakeLite grew out of one person's machine, and a few identifiers are still hardcoded. None of them stop it from running, but you should know about them before you install it somewhere else.
+Everything machine-specific is an environment variable with a safe default. Nothing needs editing to run WakeLite on your own Mac.
 
-- launchd labels are `com.wakelite.*`. The user agent is per-user, so it will not collide with another account, but the name will look odd on your Mac.
-- The system reconciler installs to `/Library/LaunchDaemons/com.wakelite.wakereconciler.plist`, which is machine-wide. Two users on one Mac would overwrite each other's copy.
-- `AMQ_BINARY_PATH` in `wakelite/config.py` is `/opt/homebrew/bin/amq`. An Intel Mac needs `/usr/local/bin/amq` instead.
-- The Slack notifier resolves its token from `SLACK_BOT_TOKEN`, then a Keychain entry, then `~/.claude.json`, and targets a fixed DM channel. Without a token it skips Slack and everything else still works.
+| Variable | Default | Purpose |
+|---|---|---|
+| `WAKELITE_HOME` | `~/.wakelite` | Timer store, SQLite state, and run logs |
+| `WAKELITE_SLACK_CHANNEL` | unset | Slack channel or DM id to notify. **Unset means Slack is off** — WakeLite never posts anywhere you did not name |
+| `SLACK_BOT_TOKEN` | unset | Slack token. Checked before the Keychain |
+| `WAKELITE_KEYCHAIN_SERVICE` | `wakelite-slack-bot-token` | Keychain item holding the Slack token |
+| `WAKELITE_KEYCHAIN_ACCOUNT` | `wakelite` | Keychain account for that item |
+| `DAILY_MERGE_AUTHOR_PATTERN` | unset | Case-insensitive regex of commit authors `daily-merge-stable.sh` may auto-merge. **Unset means no author is trusted**, so every branch escalates instead |
+
+Store the Slack token like this:
+
+```bash
+security add-generic-password -s wakelite-slack-bot-token -a wakelite -w <token>
+export WAKELITE_SLACK_CHANNEL=C0123ABCD
+```
+
+One thing is still hardcoded: `AMQ_BINARY_PATH` in `wakelite/config.py` points at `/opt/homebrew/bin/amq`. An Intel Mac needs `/usr/local/bin/amq`.
 
 ## Docs
 

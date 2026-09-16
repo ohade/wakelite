@@ -14,16 +14,21 @@ from .config import API_HOST, API_PORT
 
 logger = logging.getLogger(__name__)
 
-SLACK_CHANNEL = "<set-WAKELITE_SLACK_CHANNEL>"
+# Slack destination for notifications. There is no default: an unset value
+# means "do not post to Slack", so a fresh clone never messages a stranger's
+# channel. Set WAKELITE_SLACK_CHANNEL to a channel or DM id such as "C0123ABCD".
+SLACK_CHANNEL = os.environ.get("WAKELITE_SLACK_CHANNEL", "")
 
 # Distinguishes "not looked up yet" from "looked up, not installed" (None).
 _UNRESOLVED = object()
 
 # Keychain item holding the Slack bot token (ai-audit A7, 2026-06-15).
-# Moved out of plaintext ~/.claude.json. Read with:
-#   security find-generic-password -s wakelite-slack-bot-token -a wakelite -w
-_KEYCHAIN_SERVICE = "wakelite-slack-bot-token"
-_KEYCHAIN_ACCOUNT = "wakelite"
+# Moved out of plaintext ~/.claude.json. Both halves are configurable so the
+# lookup matches whatever you named the item:
+#   security add-generic-password -s "$WAKELITE_KEYCHAIN_SERVICE" \
+#       -a "$WAKELITE_KEYCHAIN_ACCOUNT" -w <token>
+_KEYCHAIN_SERVICE = os.environ.get("WAKELITE_KEYCHAIN_SERVICE", "wakelite-slack-bot-token")
+_KEYCHAIN_ACCOUNT = os.environ.get("WAKELITE_KEYCHAIN_ACCOUNT", "wakelite")
 
 
 def _resolve_slack_token() -> Optional[str]:
@@ -168,6 +173,9 @@ class Notifier:
         """
         branded = f":zap: *WakeLite*\n───\n{text}"
         try:
+            if not channel:
+                logger.debug("Slack notify skipped: no channel (set WAKELITE_SLACK_CHANNEL)")
+                return None
             token = _resolve_slack_token()
             if not token:
                 logger.warning("Slack notify skipped: no token (Keychain/env/claude.json all empty)")

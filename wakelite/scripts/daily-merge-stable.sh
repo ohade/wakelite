@@ -217,17 +217,32 @@ classify_failure() {
     fi
 }
 
+# Auto-merge is only safe for branches you wrote yourself, so the caller
+# declares who "yourself" is. DAILY_MERGE_AUTHOR_PATTERN is a case-insensitive
+# extended regex matched against each commit's author name. Unset means no
+# author is trusted, which makes every branch escalate instead of merging --
+# the safe default for a fresh clone.
 all_authors_are_trusted() {
     local authors="$1"
     local author
+    local pattern="${DAILY_MERGE_AUTHOR_PATTERN:-}"
+    if [[ -z "$pattern" ]]; then
+        FOREIGN_AUTHOR="$(head -n1 <<<"$authors")"
+        [[ -z "$FOREIGN_AUTHOR" ]] && return 0
+        return 1
+    fi
+    local rc=0
+    shopt -s nocasematch
     while IFS= read -r author; do
         [[ -z "$author" ]] && continue
-        if [[ ! "$author" =~ $DAILY_MERGE_AUTHOR_PATTERN ]]; then
+        if [[ ! "$author" =~ $pattern ]]; then
             FOREIGN_AUTHOR="$author"
-            return 1
+            rc=1
+            break
         fi
     done <<<"$authors"
-    return 0
+    shopt -u nocasematch
+    return $rc
 }
 
 snapshot_sha_for_ref() {

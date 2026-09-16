@@ -15,3 +15,6 @@ scripts/
 
 # Machine-local git worktrees; never part of the published tree.
 .claude/worktrees/
+
+# Internal delegation briefs and run logs: working notes, not product docs.
+.claude/briefs-selfheal/
