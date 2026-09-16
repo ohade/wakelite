@@ -52,16 +52,45 @@ def _write_agent(template: Path, target: Path) -> None:
     target.write_text(_render(template))
 
 
+def _bootout(domain: str, target: Path) -> Dict:
+    """Unload an agent, distinguishing "was not loaded" from a real failure.
+
+    Install and uninstall both boot out before they bootstrap, so on a clean
+    machine the agent is not loaded and launchctl fails. It reports that as
+    EIO (5) with "Boot-out failed: 5: Input/output error" rather than as a
+    distinct code, so matching on the code alone would also swallow genuine
+    I/O errors -- hence the message check as well.
+
+    Reported by a first-time user on 2026-09-16: the raw non-zero result read
+    as a broken install even though the following bootstrap returned 0.
+
+    Returns the usual `_run` dict plus a `status` of `unloaded`, `not_loaded`,
+    or `failed`. A `not_loaded` result is normalised to returncode 0 because
+    nothing went wrong; `failed` keeps its original code and stderr.
+    """
+    result = _run(["launchctl", "bootout", domain, str(target)])
+    if result["returncode"] == 0:
+        result["status"] = "unloaded"
+        return result
+    stderr = result.get("stderr", "")
+    if result["returncode"] == 5 and "Input/output error" in stderr:
+        result["status"] = "not_loaded"
+        result["detail"] = "was not loaded; nothing to unload"
+        result["launchctl_returncode"] = result["returncode"]
+        result["returncode"] = 0
+        return result
+    result["status"] = "failed"
+    return result
+
+
 def install_user(load: bool = False) -> Dict:
     _write_agent(USER_TEMPLATE, USER_TARGET)
     _write_agent(WATCHDOG_TEMPLATE, WATCHDOG_TARGET)
     result = {"installed": str(USER_TARGET), "installed_watchdog": str(WATCHDOG_TARGET)}
     if load:
-        result["bootout"] = _run(["launchctl", "bootout", f"gui/{_uid()}", str(USER_TARGET)])
+        result["bootout"] = _bootout(f"gui/{_uid()}", USER_TARGET)
         result["bootstrap"] = _run(["launchctl", "bootstrap", f"gui/{_uid()}", str(USER_TARGET)])
-        result["watchdog_bootout"] = _run(
-            ["launchctl", "bootout", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
-        )
+        result["watchdog_bootout"] = _bootout(f"gui/{_uid()}", WATCHDOG_TARGET)
         result["watchdog_bootstrap"] = _run(
             ["launchctl", "bootstrap", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
         )
@@ -71,10 +100,8 @@ def install_user(load: bool = False) -> Dict:
 def uninstall_user(unload: bool = False) -> Dict:
     result = {"removed": False, "path": str(USER_TARGET)}
     if unload:
-        result["bootout"] = _run(["launchctl", "bootout", f"gui/{_uid()}", str(USER_TARGET)])
-        result["watchdog_bootout"] = _run(
-            ["launchctl", "bootout", f"gui/{_uid()}", str(WATCHDOG_TARGET)]
-        )
+        result["bootout"] = _bootout(f"gui/{_uid()}", USER_TARGET)
+        result["watchdog_bootout"] = _bootout(f"gui/{_uid()}", WATCHDOG_TARGET)
     if USER_TARGET.exists():
         USER_TARGET.unlink()
         result["removed"] = True
@@ -88,7 +115,7 @@ def install_system(load: bool = False) -> Dict:
     shutil.copy2(SYSTEM_TEMPLATE, SYSTEM_TARGET)
     result = {"installed": str(SYSTEM_TARGET)}
     if load:
-        result["bootout"] = _run(["launchctl", "bootout", "system", str(SYSTEM_TARGET)])
+        result["bootout"] = _bootout("system", SYSTEM_TARGET)
         result["bootstrap"] = _run(["launchctl", "bootstrap", "system", str(SYSTEM_TARGET)])
     return result
 
@@ -96,7 +123,7 @@ def install_system(load: bool = False) -> Dict:
 def uninstall_system(unload: bool = False) -> Dict:
     result = {"removed": False, "path": str(SYSTEM_TARGET)}
     if unload:
-        result["bootout"] = _run(["launchctl", "bootout", "system", str(SYSTEM_TARGET)])
+        result["bootout"] = _bootout("system", SYSTEM_TARGET)
     if SYSTEM_TARGET.exists():
         SYSTEM_TARGET.unlink()
         result["removed"] = True

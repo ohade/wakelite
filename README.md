@@ -98,6 +98,11 @@ Install the runner as a launchd **user** agent. No `sudo`, and it does not touch
 ./bin/wakelitectl health
 ```
 
+**Clone somewhere permanent first.** The generated plist hardcodes the absolute
+path of this checkout, so installing from `/tmp` leaves launchd pointing at a
+directory macOS will delete. Move the clone and rerun `launchd install` if you
+already did that. To undo an install entirely: `./bin/wakelitectl launchd uninstall --scope user`.
+
 After you change the code, restart it. This purges `__pycache__` and kickstarts the job:
 
 ```bash
