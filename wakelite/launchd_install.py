@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import shutil
+import os
+import plistlib
 import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from .config import OWNER
 
@@ -52,6 +53,36 @@ def _write_agent(template: Path, target: Path) -> None:
     target.write_text(_render(template))
 
 
+def _verify_program(rendered: str) -> Optional[str]:
+    """Return a problem string if the plist's program is not executable, else None.
+
+    `launchctl bootstrap` accepts a plist whose ProgramArguments[0] does not
+    exist and still exits 0, so a successful install proves nothing about
+    whether the job can actually run. This is what let the unrendered system
+    daemon look healthy. Checking the rendered path turns that class of bug
+    into an install-time error instead of a silent no-op.
+    """
+    try:
+        args = plistlib.loads(rendered.encode())["ProgramArguments"]
+    except Exception as exc:  # unparseable plist is itself a problem worth naming
+        return f"could not read ProgramArguments: {exc}"
+    if not args:
+        return "ProgramArguments is empty"
+    program = args[0]
+    if not os.access(program, os.X_OK):
+        return f"not executable: {program}"
+    return None
+
+
+def _collect_problems(*templates: Path) -> list:
+    problems = []
+    for t in templates:
+        problem = _verify_program(_render(t))
+        if problem:
+            problems.append({"template": t.name, "problem": problem})
+    return problems
+
+
 def _bootout(domain: str, target: Path) -> Dict:
     """Unload an agent, distinguishing "was not loaded" from a real failure.
 
@@ -86,7 +117,8 @@ def _bootout(domain: str, target: Path) -> Dict:
 def install_user(load: bool = False) -> Dict:
     _write_agent(USER_TEMPLATE, USER_TARGET)
     _write_agent(WATCHDOG_TEMPLATE, WATCHDOG_TARGET)
-    result = {"installed": str(USER_TARGET), "installed_watchdog": str(WATCHDOG_TARGET)}
+    result = {"installed": str(USER_TARGET), "installed_watchdog": str(WATCHDOG_TARGET),
+              "problems": _collect_problems(USER_TEMPLATE, WATCHDOG_TEMPLATE)}
     if load:
         result["bootout"] = _bootout(f"gui/{_uid()}", USER_TARGET)
         result["bootstrap"] = _run(["launchctl", "bootstrap", f"gui/{_uid()}", str(USER_TARGET)])
@@ -112,8 +144,13 @@ def uninstall_user(unload: bool = False) -> Dict:
 
 
 def install_system(load: bool = False) -> Dict:
-    shutil.copy2(SYSTEM_TEMPLATE, SYSTEM_TARGET)
-    result = {"installed": str(SYSTEM_TARGET)}
+    # Renders, never copies. A verbatim copy leaves the template's
+    # /path/to/... placeholders in the installed daemon, so the reconciler
+    # cannot start and wake-from-sleep silently does nothing. That bug was
+    # found and fixed for install_user() and missed here; reported from a
+    # second machine on 2026-09-16.
+    _write_agent(SYSTEM_TEMPLATE, SYSTEM_TARGET)
+    result = {"installed": str(SYSTEM_TARGET), "problems": _collect_problems(SYSTEM_TEMPLATE)}
     if load:
         result["bootout"] = _bootout("system", SYSTEM_TARGET)
         result["bootstrap"] = _run(["launchctl", "bootstrap", "system", str(SYSTEM_TARGET)])
