@@ -304,6 +304,7 @@ One thing is still hardcoded: `AMQ_BINARY_PATH` in `wakelite/config.py` points a
 
 ## Docs
 
+- **[`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md)** — a prompt that makes an AI agent onboard you against your own machine: what WakeLite is, getting it running, driving it from the dashboard and the CLI, and which timers are actually worth setting up for you
 - **[`docs/API.md`](docs/API.md)** — full timer schema, field reference, recurrence types, execution controls, REST API reference, callback fields
 - **[`.claude/rules/timer-authoring-gotchas.md`](.claude/rules/timer-authoring-gotchas.md)** — schema traps, interval and daemon rules, callback behaviour
 - **[`CLAUDE.md`](CLAUDE.md)** — architecture, module map, and the reasoning behind the capacity gate, the boot-window network wait, and orphan reclaim
