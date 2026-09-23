@@ -75,6 +75,8 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
 PYTHONPATH=/path/to/wakelite python3 -m wakelite.cli timer list
 ```
 
+**Claude Code skill:** run `./skill/install.sh` to teach Claude Code how to use this checkout. See [`skill/README.md`](skill/README.md).
+
 Data lives in `~/.wakelite/` (timers, SQLite state, logs). Set `WAKELITE_HOME` to relocate it. Never copy another machine's `~/.wakelite/` — it holds that machine's live timers.
 
 ## Run It
