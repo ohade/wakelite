@@ -294,6 +294,7 @@ Everything machine-specific is an environment variable with a safe default. Noth
 | `WAKELITE_KEYCHAIN_SERVICE` | `wakelite-slack-bot-token` | Keychain item holding the Slack token |
 | `WAKELITE_KEYCHAIN_ACCOUNT` | `wakelite` | Keychain account for that item |
 | `DAILY_MERGE_AUTHOR_PATTERN` | unset | Case-insensitive regex of commit authors `daily-merge-stable.sh` may auto-merge. **Unset means no author is trusted**, so every branch escalates instead |
+| `DAILY_MERGE_APPROVED_BRANCHES_CMD` | unset | Executable that prints, one per line, the branches whose pull request already has an approval. `daily-merge-stable.sh` leaves those branches unchanged. If the command fails, the run merges nothing and exits 75. Unset means no approval check |
 
 Store the Slack token like this:
 

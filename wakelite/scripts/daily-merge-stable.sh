@@ -31,8 +31,16 @@ if [[ -n "${DAILY_MERGE_EXCLUDED_BRANCHES:-}" ]]; then
     IFS=':' read -r -a EXCLUDED_BRANCHES <<<"$DAILY_MERGE_EXCLUDED_BRANCHES"
 fi
 
+# A branch whose pull request already has an approval must not change under
+# its reviewers. The caller supplies a command that prints one branch name per
+# line; the code-host query stays outside this reusable script. Unset means no
+# approval check.
+APPROVED_BRANCHES_CMD="${DAILY_MERGE_APPROVED_BRANCHES_CMD:-}"
+declare -a APPROVED_BRANCHES=()
+
 merged=0
 pushed=0
+removed=0
 skipped=0
 conflict_resolved=0
 conflict_failed=0
@@ -77,6 +85,47 @@ is_excluded_branch() {
         fi
     done
     return 1
+}
+
+is_approved_branch() {
+    local candidate="$1"
+    local approved
+    for approved in "${APPROVED_BRANCHES[@]}"; do
+        if [[ "$candidate" == "$approved" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The tracked remote branch is gone (usually merged and deleted), so the
+# worktree has no further use. Its uncommitted files are discarded by design;
+# they are logged first. The local branch is kept, so no commit is lost.
+remove_gone_worktree() {
+    local wt_path="$1"
+    local dir_name="$2"
+    local branch="$3"
+    local dirty_files dirty_count remove_output
+
+    dirty_files="$($GIT_BIN -C "$wt_path" status --porcelain --untracked-files=all 2>/dev/null || true)"
+    dirty_count=0
+    if [[ -n "$dirty_files" ]]; then
+        dirty_count="$(printf '%s\n' "$dirty_files" | wc -l | tr -d ' ')"
+        log "Discarding $dirty_count uncommitted file(s) in $dir_name [$branch]:"
+        while IFS= read -r dirty_line; do
+            log "    $dirty_line"
+        done <<<"$dirty_files"
+    fi
+    if ! remove_output="$($GIT_BIN -C "$PRODUCTS_REPO" worktree remove --force "$wt_path" 2>&1)"; then
+        log "Worktree removal failed for $dir_name: $remove_output"
+        record_failure "$branch" "remote_gone" "remote branch deleted; worktree removal failed" true
+        add_summary "ESCALATE (remote gone, removal failed): $dir_name [$branch]"
+        return 1
+    fi
+    reset_failure "$branch"
+    ((removed++))
+    add_summary "REMOVED (remote gone, $dirty_count uncommitted file(s) discarded, branch kept): $dir_name [$branch]"
+    return 0
 }
 
 state_file_for_branch() {
@@ -530,6 +579,7 @@ finish_run() {
     log "=========================================="
     log "  Merged:              $merged"
     log "  Pushed:              $pushed"
+    log "  Worktrees removed:   $removed"
     log "  Conflicts resolved:  $conflict_resolved"
     log "  Conflicts unresolved:$conflict_failed"
     log "  Already up-to-date:  $already_uptodate"
@@ -632,6 +682,22 @@ fi
 reset_failure "__fetch__"
 log "Fetch complete."
 
+if [[ -n "$APPROVED_BRANCHES_CMD" ]]; then
+    log "Reading branches whose pull request is approved..."
+    if ! approved_output="$("$APPROVED_BRANCHES_CMD" 2>>"$LOG_FILE")"; then
+        # Without the list, any merge could land on an approved branch.
+        record_failure "__approvals__" "transient_network" "approved-PR lookup failed; merged nothing" false
+        add_summary "FAIL (approved-PR lookup): merged nothing"
+        finish_run
+        exit $?
+    fi
+    reset_failure "__approvals__"
+    while IFS= read -r approved_line; do
+        [[ -n "$approved_line" ]] && APPROVED_BRANCHES+=("$approved_line")
+    done <<<"$approved_output"
+    log "Branches with an approved pull request: ${#APPROVED_BRANCHES[@]}"
+fi
+
 STABLE_WT="${WORKTREE_DIR}/stable"
 if [[ -d "$STABLE_WT" ]]; then
     stable_sha="$($GIT_BIN -C "$PRODUCTS_REPO" rev-parse "$MERGE_REF" 2>/dev/null || true)"
@@ -686,8 +752,10 @@ while IFS= read -r wt_path; do
 
     branch="$($GIT_BIN -C "$wt_path" symbolic-ref --short HEAD 2>/dev/null || true)"
     if [[ -z "$branch" ]]; then
-        record_failure "$dir_name" "environment_fault" "managed worktree has detached HEAD" true
-        add_summary "ESCALATE (detached HEAD): $dir_name"
+        # A detached checkout (a review or a pinned build) has no branch to merge into.
+        reset_failure "$dir_name"
+        add_summary "SKIP (detached HEAD): $dir_name"
+        ((skipped++))
         continue
     fi
     if ! "$GIT_BIN" check-ref-format --branch "$branch" >/dev/null 2>&1; then
@@ -704,8 +772,13 @@ while IFS= read -r wt_path; do
 
     upstream_status="$($GIT_BIN -C "$wt_path" for-each-ref --format='%(upstream:track)' "refs/heads/$branch" 2>/dev/null || true)"
     if [[ "$upstream_status" == "[gone]" ]]; then
-        record_failure "$branch" "remote_gone" "tracked remote branch was deleted" true
-        add_summary "ESCALATE (remote gone): $dir_name [$branch]"
+        remove_gone_worktree "$wt_path" "$dir_name" "$branch" || true
+        continue
+    fi
+    if is_approved_branch "$branch"; then
+        reset_failure "$branch"
+        add_summary "SKIP (approved PR, left unchanged for reviewers): $dir_name [$branch]"
+        ((skipped++))
         continue
     fi
     if remote_was_rewritten "$wt_path" "$branch"; then

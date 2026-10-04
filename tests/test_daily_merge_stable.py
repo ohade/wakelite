@@ -124,6 +124,7 @@ class DailyMergeStableFixtureTests(unittest.TestCase):
         *,
         git_mode: str = "normal",
         notify_exit: int = 0,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self.git_mode.write_text(f"{git_mode}\n", encoding="utf-8")
         env = os.environ.copy()
@@ -152,6 +153,7 @@ class DailyMergeStableFixtureTests(unittest.TestCase):
                 "FIXTURE_RACE_MARKER": str(self.race_marker),
             }
         )
+        env.update(extra_env or {})
         return subprocess.run(
             ["bash", str(SCRIPT)],
             cwd=REPO_ROOT,
@@ -269,6 +271,78 @@ class DailyMergeStableFixtureTests(unittest.TestCase):
         ]
         self.assertTrue(state_rows)
         self.assertTrue(all(row[3] == "0" for row in state_rows), state_rows)
+
+    def _remote_feature_has(self, path: str) -> bool:
+        self._git("fetch", "origin", "feature/test", cwd=self.products)
+        shown = self._git(
+            "cat-file", "-e", f"origin/feature/test:{path}", cwd=self.products, check=False
+        )
+        return shown.returncode == 0
+
+    def _approval_command(self, *, prints: str = "", exit_code: int = 0) -> dict[str, str]:
+        command = self.root / "fixture-approved-branches.sh"
+        command.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s' '{prints}'\n"
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
+        command.chmod(0o755)
+        return {"DAILY_MERGE_APPROVED_BRANCHES_CMD": str(command)}
+
+    def test_fixture_remote_gone_removes_worktree_and_its_uncommitted_files(self) -> None:
+        self._git("push", "origin", "--delete", "feature/test", cwd=self.products)
+        (self.feature_worktree / "feature.txt").write_text("edited\n", encoding="utf-8")
+        (self.feature_worktree / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+
+        result = self._run_script()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.feature_worktree.exists())
+        self.assertIn("scratch.txt", result.stdout)
+        branch = self._git("rev-parse", "--verify", "refs/heads/feature/test", cwd=self.products, check=False)
+        self.assertEqual(branch.returncode, 0, "the local branch must be kept")
+        self.assertEqual(self._notification_count(), 0)
+
+    def test_fixture_never_pushed_branch_keeps_its_worktree(self) -> None:
+        local_only = self.worktree_root / "local-only"
+        self._git("worktree", "add", "-b", "feature/local-only", str(local_only), "master", cwd=self.products)
+        (local_only / "draft.txt").write_text("draft\n", encoding="utf-8")
+
+        self._run_script()
+
+        self.assertTrue((local_only / "draft.txt").exists())
+
+    def test_fixture_branch_with_approved_pr_is_not_merged(self) -> None:
+        result = self._run_script(extra_env=self._approval_command(prints="feature/test\n"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self._remote_feature_has("stable.txt"))
+        self.assertIn("approved PR", result.stdout)
+        self.assertEqual(self._notification_count(), 0)
+
+    def test_fixture_branch_without_approval_is_still_merged(self) -> None:
+        result = self._run_script(extra_env=self._approval_command(prints="feature/other\n"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self._remote_feature_has("stable.txt"))
+
+    def test_fixture_failed_approval_lookup_merges_nothing(self) -> None:
+        result = self._run_script(extra_env=self._approval_command(exit_code=1))
+
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertFalse(self._remote_feature_has("stable.txt"))
+        self.assertEqual(self._notification_count(), 0)
+
+    def test_fixture_detached_checkout_is_skipped_without_escalation(self) -> None:
+        detached = self.worktree_root / "detached-review"
+        self._git("worktree", "add", "--detach", str(detached), "master", cwd=self.products)
+
+        result = self._run_script()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._notification_count(), 0)
+        self.assertIn("SKIP (detached HEAD)", result.stdout)
 
 
 if __name__ == "__main__":
