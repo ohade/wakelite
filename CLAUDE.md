@@ -91,7 +91,7 @@ Timer execution tests call `svc._schedule_occurrence()` directly and `time.sleep
 
 ## Web UI
 
-The entire web UI is an HTML string embedded in `http_api.py` (served at `/ui`). There are no separate HTML/JS/CSS files. Edits to the UI mean editing the Python string in `http_api.py`.
+`GET /ui` serves `docs/ui2-live.html`, a single file with inline CSS and JS and no build step. It is re-read on every request, so an HTML edit goes live on reload; Python changes still need a runner restart. The HTML string embedded in `http_api.py` is only a fallback for when that file is missing. `tests/ui_health_contract.test.js` (run by `tests/test_ui_health_contract.py`, needs Node) executes the inline script against DOM stubs.
 
 ## Deployment
 

@@ -323,6 +323,25 @@
   .breadcrumb .sep { color: var(--text-tertiary); }
   .breadcrumb .current { color: var(--text-secondary); font-weight: 600; }
 
+  /* Run grid: one row per timer, one bubble per local day. */
+  .run-grid { min-width: 0; }
+  .run-grid td.grid-name { white-space: nowrap; cursor: pointer; }
+  .run-grid td.grid-name:hover .grid-timer { color: var(--accent); }
+  .run-grid th.grid-day, .run-grid td.grid-day { text-align: center; padding: 8px 3px; }
+  .run-grid th.grid-day { font-size: 11px; color: var(--text-tertiary); line-height: 1.3; font-weight: 500; }
+  .run-grid tr.grid-disabled { opacity: 0.45; }
+  .grid-cell { display: inline-block; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--text-tertiary); cursor: pointer; vertical-align: middle; }
+  .grid-cell.success { background: var(--success); border-color: var(--success); }
+  .grid-cell.partial { background: var(--warning); border-color: var(--warning); }
+  .grid-cell.failed { background: var(--error); border-color: var(--error); }
+  .grid-cell.waiting { background: var(--daemon); border-color: var(--daemon); }
+  .grid-cell.other { background: var(--text-tertiary); }
+  .grid-cell.none { background: transparent; opacity: 0.3; }
+  .grid-streak { color: var(--error); font-size: 12px; margin-left: 10px; font-weight: 600; }
+  .grid-type { color: var(--text-tertiary); font-size: 12px; margin-left: 8px; }
+  .grid-legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 0 0 14px; font-size: var(--fs-base); color: var(--text-secondary); }
+  .grid-legend span { display: inline-flex; align-items: center; gap: 7px; }
+
   .detail-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
   .detail-header-info { flex: 1; }
   .detail-header-info h2 { font-size: var(--fs-lg); font-weight: 700; letter-spacing: -0.03em; margin-bottom: 4px; }
@@ -400,6 +419,7 @@
     <span class="topbar-title">WakeLite</span>
     <div class="topbar-nav">
       <button class="topbar-nav-item active" data-view="dashboard">Dashboard</button>
+      <button class="topbar-nav-item" data-view="grid">Grid</button>
       <button class="topbar-nav-item" data-view="incidents">Incidents</button>
     </div>
     <div id="healthPill" class="status-pill"><span class="dot"></span> <span id="healthText">Connecting...</span></div>
@@ -435,6 +455,26 @@
       <div class="section-header animate-in d4"><div style="display:flex;align-items:center"><span class="section-title">Recent Activity</span><span class="section-count" id="activityCount">0</span></div></div>
     </div>
     <div class="activity-card glass animate-in d5" id="activityCard"></div>
+  </div>
+
+  <!-- ===== GRID VIEW ===== -->
+  <div id="view-grid" class="view">
+    <div class="breadcrumb animate-in"><a onclick="showView('dashboard')">Dashboard</a><span class="sep">/</span><span class="current">Grid</span></div>
+    <div class="section-header animate-in d1"><div style="display:flex;align-items:center"><span class="section-title">Runs per day, last 14 days</span><span class="section-count" id="gridSummary">--</span></div></div>
+    <div class="grid-legend animate-in d1">
+      <span><i class="grid-cell success"></i>All runs succeeded</span>
+      <span><i class="grid-cell partial"></i>Some runs failed</span>
+      <span><i class="grid-cell failed"></i>Most runs failed</span>
+      <span><i class="grid-cell waiting"></i>Waiting only</span>
+      <span><i class="grid-cell other"></i>Stopped or running</span>
+      <span><i class="grid-cell none"></i>No run</span>
+    </div>
+    <div class="timers-card glass animate-in d2">
+      <table class="timers-table run-grid">
+        <thead id="gridHead"></thead>
+        <tbody id="gridBody"></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- ===== INCIDENTS VIEW ===== -->
@@ -961,6 +1001,59 @@ function showView(name, opts) {
   });
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (name === 'incidents') loadIncidents();
+  if (name === 'grid') loadGrid();
+}
+
+// ===== RUN GRID =====
+const GRID_STATUS_ORDER = ['failed', 'uncertain_crash', 'success', 'waiting', 'aborted', 'shutdown', 'started'];
+
+// Pure string escaping, so the grid does not depend on DOM serialisation.
+function gridEsc(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function gridCellTitle(cell) {
+  const counts = cell.counts || {};
+  const keys = Object.keys(counts).sort((a, b) => {
+    const ia = GRID_STATUS_ORDER.indexOf(a), ib = GRID_STATUS_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  if (!keys.length) return `${cell.day}: no run`;
+  return `${cell.day}: ` + keys.map(k => `${counts[k]} ${k.replace('_', ' ')}`).join(', ');
+}
+
+function gridDayHeader(day) {
+  const date = new Date(day + 'T12:00:00');
+  const weekday = isNaN(date) ? '' : date.toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 2);
+  return `<th class="grid-day" title="${gridEsc(day)}">${gridEsc(weekday)}<br>${gridEsc(day.slice(8, 10))}</th>`;
+}
+
+async function loadGrid() {
+  let data;
+  try {
+    data = await (await fetch('/v1/runs/grid?days=14')).json();
+  } catch (e) {
+    el('gridSummary').textContent = 'Unavailable';
+    return;
+  }
+  const days = data.days || [];
+  const timers = data.timers || [];
+  el('gridHead').innerHTML = '<tr><th>Timer</th>' + days.map(gridDayHeader).join('') + '</tr>';
+  let failing = 0;
+  el('gridBody').innerHTML = timers.map(t => {
+    const cells = t.days || [];
+    const latest = cells.length ? cells[cells.length - 1].state : 'none';
+    if (t.failure_streak > 0 || latest === 'failed' || latest === 'partial') failing++;
+    const id = gridEsc(JSON.stringify(t.timer_id));
+    const streak = t.failure_streak > 0 ? `<span class="grid-streak">streak ${t.failure_streak}</span>` : '';
+    const type = t.timer_type === 'daemon' ? '<span class="grid-type">daemon</span>' : '';
+    const bubbles = cells.map(c =>
+      `<td class="grid-day"><i class="grid-cell ${gridEsc(c.state)}" title="${gridEsc(gridCellTitle(c))}" onclick="openTimerDetail(${id})"></i></td>`
+    ).join('');
+    return `<tr class="${t.enabled ? '' : 'grid-disabled'}"><td class="grid-name" onclick="openTimerDetail(${id})">`
+      + `<span class="grid-timer">${gridEsc(t.name)}</span>${type}${streak}</td>${bubbles}</tr>`;
+  }).join('');
+  el('gridSummary').textContent = failing ? `${failing} failing` : 'all green';
 }
 
 document.querySelectorAll('.topbar-nav-item').forEach(btn => {
@@ -2054,6 +2147,7 @@ el('createOnceDate').value = new Date().toISOString().slice(0, 10);
 updateCreateFormVisibility();
 loadDashboard();
 setInterval(loadDashboard, 10000);
+setInterval(() => { if (currentView === 'grid') loadGrid(); }, 30000);
 // Deep links, so a desktop notification can land on the thing it is about
 // instead of the dashboard. Guarded because the DOM contract test evaluates
 // this script without a `location`.
@@ -2061,6 +2155,7 @@ function applyDeepLink() {
   if (typeof location === 'undefined') return;
   const hash = location.hash || '';
   if (hash === '#incidents') { showView('incidents'); return; }
+  if (hash === '#grid') { showView('grid'); return; }
   if (hash.startsWith('#timer/')) {
     const timerId = decodeURIComponent(hash.slice('#timer/'.length));
     if (timerId) openTimerDetail(timerId);

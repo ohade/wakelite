@@ -650,6 +650,65 @@ class WakeLiteService:
             fn=_abort,
         )
 
+    @staticmethod
+    def _grid_cell_state(counts: Dict[str, int]) -> str:
+        failed = counts.get("failed", 0) + counts.get("uncertain_crash", 0)
+        succeeded = counts.get("success", 0)
+        if failed:
+            return "failed" if failed >= succeeded else "partial"
+        if succeeded:
+            return "success"
+        if counts.get("waiting"):
+            return "waiting"
+        return "other" if counts else "none"
+
+    def run_grid(self, days: int = 14) -> Dict[str, Any]:
+        """One row per timer, one cell per local day, so a failing timer shows at a glance.
+
+        Day cells rather than the last N runs: a 2-minute timer and a weekly one stay
+        comparable on the same screen.
+        """
+        days = min(max(int(days), 1), 60)
+        today = datetime.now().astimezone().date()
+        day_keys = [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+        wanted = set(day_keys)
+        since = (datetime.now(timezone.utc) - timedelta(days=days + 1)).isoformat()
+        counts: Dict[str, Dict[str, Dict[str, int]]] = {}
+        for row in self.state.run_counts_by_local_day(since):
+            if row["day"] in wanted:
+                per_day = counts.setdefault(row["timer_id"], {}).setdefault(row["day"], {})
+                per_day[row["status"]] = per_day.get(row["status"], 0) + int(row["n"])
+
+        rows = []
+        for timer in self.timer_store.list_timers():
+            timer_counts = counts.get(timer["id"], {})
+            is_daemon = timer.get("timer_type") == "daemon"
+            rows.append({
+                "timer_id": timer["id"],
+                "name": timer.get("name", timer["id"]),
+                "enabled": bool(timer.get("enabled", True)),
+                "timer_type": timer.get("timer_type", "scheduled"),
+                # A daemon's streak counter is not reset while it runs, so it is not shown.
+                "failure_streak": 0 if is_daemon else self.state.get_runtime(timer["id"]).failure_streak,
+                "days": [
+                    {"day": day, "state": self._grid_cell_state(timer_counts.get(day, {})),
+                     "counts": timer_counts.get(day, {})}
+                    for day in day_keys
+                ],
+            })
+
+        def sort_key(row: Dict[str, Any]) -> Tuple[int, int, int, str]:
+            recent_bad = any(cell["state"] in ("failed", "partial") for cell in row["days"][-3:])
+            return (
+                1 if row["timer_type"] == "daemon" else 0,
+                0 if row["failure_streak"] > 0 else 1,
+                0 if recent_bad else 1,
+                row["name"].lower(),
+            )
+
+        rows.sort(key=sort_key)
+        return {"days": day_keys, "timers": rows}
+
     def list_runs(self, limit: int = 100, timer_id: Optional[str] = None) -> List[Dict[str, Any]]:
         runs = self.state.list_runs(limit=limit, timer_id=timer_id)
         timer_name_by_id = {t["id"]: t.get("name", t["id"]) for t in self.timer_store.list_timers()}

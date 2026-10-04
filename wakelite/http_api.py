@@ -1467,6 +1467,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"panes": panes})
                 return
 
+            if method == "GET" and path == "/v1/runs/grid":
+                days = int((q.get("days") or ["14"])[0])
+                self._send_json(200, self.service.run_grid(days=days))
+                return
+
             if method == "GET" and path == "/v1/runs":
                 limit = int((q.get("limit") or ["100"])[0])
                 timer_id = (q.get("timer_id") or [None])[0]

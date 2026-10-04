@@ -26,6 +26,12 @@ The health response includes:
 
 ### Runs
 - `GET /v1/runs?limit=100&timer_id=<optional>`
+- `GET /v1/runs/grid?days=14` — one row per timer with one cell per local calendar day
+  (1-60 days, oldest first). Each cell has `state` (`success`, `partial` = some runs
+  failed, `failed` = failures at least equal to successes, `waiting`, `other`, `none`)
+  and the run `counts` by status. Rows carry `failure_streak` (0 for daemons) and sort
+  scheduled timers with a streak or a recent failure first, daemons last. Backs the
+  dashboard's Grid tab (`/ui#grid`)
 - `GET /v1/runs/{run_id}/logs`
 - `POST /v1/runs/{run_id}/abort` (requires `idempotency_key`)
 

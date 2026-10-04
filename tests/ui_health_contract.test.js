@@ -100,9 +100,25 @@ const healthPayload = {
   uptime_seconds: 65,
 };
 
+const gridPayload = {
+  days: ['2026-10-02', '2026-10-03'],
+  timers: [{
+    timer_id: 'timer-1',
+    name: 'keep-track-nightly <x>',
+    enabled: true,
+    timer_type: 'scheduled',
+    failure_streak: 27,
+    days: [
+      {day: '2026-10-02', state: 'partial', counts: {success: 3, failed: 1}},
+      {day: '2026-10-03', state: 'failed', counts: {success: 1, failed: 287}},
+    ],
+  }],
+};
+
 async function fetchStub(url) {
   let payload;
   if (url === '/v1/health') payload = healthPayload;
+  else if (url === '/v1/runs/grid?days=14') payload = gridPayload;
   else if (url === '/v1/timers') payload = {timers: []};
   else if (url === '/v1/runs?limit=20') payload = {runs: []};
   else throw new Error(`unexpected dashboard request: ${url}`);
@@ -200,6 +216,22 @@ async function run() {
   view = render({unacknowledged_incidents: 7, uptime_seconds: 7});
   assert.equal(view.incidents.textContent, 'Unavailable');
   assert.equal(view.banner.classList.contains('hidden'), true);
+
+  // Grid view: one row per timer, one bubble per day.
+  for (const id of ['view-grid', 'gridHead', 'gridBody', 'gridSummary']) {
+    assert.ok(elementIds.has(id), `dashboard DOM is missing #${id}`);
+  }
+  assert.match(html, /data-view="grid"/, 'top bar has no Grid tab');
+  elements = buildElements();
+  await vm.runInContext('loadGrid()', context);
+  const gridHtml = document.getElementById('gridBody').innerHTML;
+  assert.match(gridHtml, /keep-track-nightly &lt;x&gt;/, 'timer name must be shown, escaped');
+  assert.match(gridHtml, /grid-cell partial/);
+  assert.match(gridHtml, /grid-cell failed/);
+  assert.match(gridHtml, /2026-10-03: 287 failed, 1 success/, 'bubble needs a text tooltip');
+  assert.match(gridHtml, /streak 27/);
+  assert.match(document.getElementById('gridHead').innerHTML, />03</);
+  assert.equal(document.getElementById('gridSummary').textContent, '1 failing');
 }
 
 run().catch(error => {

@@ -786,6 +786,21 @@ class StateStore:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
+    def run_counts_by_local_day(self, since: str) -> List[Dict[str, Any]]:
+        """Run counts per timer, local calendar day, and status since an ISO UTC instant."""
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                """
+                SELECT timer_id, date(created_at, 'localtime') AS day, status, COUNT(*) AS n
+                FROM run_history
+                WHERE created_at >= ?
+                GROUP BY timer_id, day, status
+                """,
+                (since,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             conn = self._connect()
